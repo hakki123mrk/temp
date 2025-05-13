@@ -3,6 +3,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const logger = require('./logger');
+const eventLogger = require('./event-logger');
 const fs = require('fs');
 const path = require('path');
 
@@ -69,17 +70,22 @@ app.post('/webhook', (req, res) => {
 
   const body = req.body;
   
-  // Log the webhook event
+  // Log all webhook events to a separate file with headers if enabled
+  eventLogger.logWebhookEvent(body, req.headers);
+  
+  // Log the webhook event with the regular logger
   logger.logWebhookEvent(body);
   
-  // Store raw webhook payload for debugging
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filename = `webhook-${timestamp}.json`;
-  fs.writeFileSync(
-    path.join(dataDir, filename),
-    JSON.stringify(body, null, 2)
-  );
-  logger.debug(`Stored webhook payload in ${filename}`);
+  // Store raw webhook payload for debugging if event logging is not enabled
+  if (process.env.ENABLE_FULL_EVENT_LOGGING !== 'true') {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `webhook-${timestamp}.json`;
+    fs.writeFileSync(
+      path.join(dataDir, filename),
+      JSON.stringify(body, null, 2)
+    );
+    logger.debug(`Stored webhook payload in ${filename}`);
+  }
 
   // Check if this is a WhatsApp Business Account Message
   if (body.object) {
@@ -245,14 +251,14 @@ async function sendOrderConfirmation(order, waId) {
     logger.info(`Sending order confirmation to ${waId}`);
     
     // In a real implementation, you would call the WhatsApp API here
-    // sendWhatsAppMessage(waId, message);
+    sendWhatsAppMessage(waId, message);
     
   } catch (error) {
     logger.error('Error sending order confirmation:', error);
   }
 }
 
-// Send WhatsApp Message Helper (implement when needed)
+// Send WhatsApp Message Helper
 async function sendWhatsAppMessage(to, message) {
   try {
     logger.debug(`Sending WhatsApp message to ${to}`, { messageLength: message.length });
@@ -286,6 +292,29 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
+// Event log viewer endpoint - for debugging use only in non-production environments
+app.get('/events', (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Forbidden in production environment' });
+  }
+  
+  const eventId = req.query.id;
+  const limit = parseInt(req.query.limit || '50', 10);
+  
+  const events = eventLogger.readEvents(eventId, limit);
+  res.json(events);
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    eventLoggingEnabled: eventLogger.isEventLoggingEnabled()
+  });
+});
+
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
   logger.error('Uncaught exception:', error);
@@ -298,4 +327,5 @@ process.on('unhandledRejection', (reason, promise) => {
 // Start server
 app.listen(PORT, () => {
   logger.info(`WhatsApp Webhook server running on port ${PORT}`);
+  logger.info(`Full event logging is ${eventLogger.isEventLoggingEnabled() ? 'enabled' : 'disabled'}`);
 });
