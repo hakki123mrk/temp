@@ -67,23 +67,58 @@ const logger = createLogger({
 
 // Add method to log order details
 logger.logOrder = function(order, waId) {
+  // Map each product item with more details
   const orderItems = order.product_items.map(item => ({
+    id: item.product_retailer_id, // iPOS product ID
     name: item.name,
     quantity: item.quantity,
-    price: `${item.price} ${item.currency}`
+    price: item.price,
+    currency: item.currency,
+    subtotal: item.price * item.quantity,
+    description: item.description || ''
   }));
-  
+
+  // Calculate order totals
   const totalAmount = order.product_items.reduce((total, item) => {
     return total + (item.price * item.quantity);
   }, 0);
-  
+
+  // Calculate VAT amount (5% in UAE)
+  const vatRate = 0.05;
+  const vatAmount = totalAmount * vatRate;
+  const roundedVatAmount = Math.round(vatAmount * 100) / 100;
+  const grandTotal = totalAmount + roundedVatAmount;
+
+  // Generate a unique order reference for tracking
+  const orderReference = `WA-${waId.slice(-4)}-${Date.now().toString().slice(-6)}`;
+
+  // Create a comprehensive order log
   this.info(`New order received from ${waId}`, {
+    orderReference,
     waId,
     catalogId: order.catalog_id,
     items: orderItems,
-    totalAmount: `${totalAmount} ${order.product_items[0].currency}`,
+    subtotal: totalAmount,
+    vat: roundedVatAmount,
+    vatRate: `${vatRate * 100}%`,
+    total: grandTotal,
+    currency: order.product_items[0].currency,
     timestamp: new Date().toISOString()
   });
+
+  // Create a separate log entry specifically for financial reporting
+  this.info(`ORDER_FINANCIAL: WhatsApp order ${orderReference}`, {
+    orderReference,
+    waId,
+    subtotal: totalAmount.toFixed(2),
+    vat: roundedVatAmount.toFixed(2),
+    total: grandTotal.toFixed(2),
+    currency: order.product_items[0].currency,
+    itemCount: order.product_items.length,
+    timestamp: new Date().toISOString()
+  });
+
+  return orderReference;
 };
 
 // Add method to log product inquiries
