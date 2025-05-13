@@ -140,7 +140,15 @@ app.post('/webhook', (req, res) => {
       });
       
       // Process shopping event
-      processShoppingEvent(shoppingData, waId, metadata);
+      // Extract profile name for shopping events
+  let profileName = 'Unknown';
+  if (body.entry[0].changes[0].value.contacts &&
+      body.entry[0].changes[0].value.contacts[0].profile &&
+      body.entry[0].changes[0].value.contacts[0].profile.name) {
+    profileName = body.entry[0].changes[0].value.contacts[0].profile.name;
+  }
+
+  processShoppingEvent(shoppingData, waId, metadata, profileName);
     } else {
       // Log other event types
       logger.debug('Received other webhook event type', { body });
@@ -215,9 +223,9 @@ async function processMessage(message, waId, profileName = 'Unknown') {
     const orderReference = logger.logOrder(order, waId);
 
     try {
-      // Process the order using the iPOS service
+      // Process the order using the iPOS service - pass the profile name to iPOS
       logger.info(`Processing order ${orderReference} from message handler...`);
-      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference);
+      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference, profileName);
 
       // Send order confirmation message with the result info
       sendOrderConfirmation(order, waId, orderResult, orderReference, profileName);
@@ -272,10 +280,10 @@ async function processMessage(message, waId, profileName = 'Unknown') {
 }
 
 // Process Shopping Event Handler
-async function processShoppingEvent(shopping, waId, metadata) {
+async function processShoppingEvent(shopping, waId, metadata, profileName = 'Unknown') {
   const shoppingEventType = Object.keys(shopping)[0]; // can be 'catalog_message', 'product_inquiry', 'order'
 
-  logger.info(`Processing ${shoppingEventType} from ${waId}`);
+  logger.info(`Processing ${shoppingEventType} from ${profileName} (${waId})`);
 
   if (shoppingEventType === 'catalog_message') {
     // User interacted with the catalog
@@ -294,16 +302,16 @@ async function processShoppingEvent(shopping, waId, metadata) {
     const orderReference = logger.logOrder(order, waId);
 
     try {
-      // Process the order and get the result - pass the order reference for tracking
-      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference);
+      // Process the order and get the result - pass the order reference and profile name for tracking
+      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference, profileName);
 
       // Send order confirmation message with the result info
-      sendOrderConfirmation(order, waId, orderResult, orderReference);
+      sendOrderConfirmation(order, waId, orderResult, orderReference, profileName);
     } catch (error) {
       logger.error(`Error processing order workflow for ${orderReference}:`, error);
 
       // Send a basic confirmation even if processing failed
-      sendOrderConfirmation(order, waId, { success: false, error: error.message }, orderReference);
+      sendOrderConfirmation(order, waId, { success: false, error: error.message }, orderReference, profileName);
     }
   }
 }

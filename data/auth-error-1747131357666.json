@@ -1,9 +1,0 @@
-{
-  "timestamp": "2025-05-13T10:15:57.666Z",
-  "error": {
-    "message": "Invalid URL",
-    "stack": "TypeError: Invalid URL\n    at new URL (node:internal/url:818:25)\n    at dispatchHttpRequest (C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:2801:20)\n    at C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:2721:5\n    at new Promise (<anonymous>)\n    at wrapAsync (C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:2701:10)\n    at http (C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:2739:10)\n    at Axios.dispatchRequest (C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:4116:10)\n    at Axios._request (C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:4416:33)\n    at Axios.request (C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:4271:25)\n    at wrap (C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:31:15)\n    at Axios.request (C:\\Projects\\self-checkout\\whatsapp-webhook\\node_modules\\axios\\dist\\node\\axios.cjs:4276:41)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async authenticateWithIPOS (C:\\Projects\\self-checkout\\whatsapp-webhook\\server.js:223:22)\n    at async processOrderToiPOS (C:\\Projects\\self-checkout\\whatsapp-webhook\\server.js:442:19)\n    at async processShoppingEvent (C:\\Projects\\self-checkout\\whatsapp-webhook\\server.js:203:27)",
-    "code": "ERR_INVALID_URL",
-    "response": null
-  }
-}

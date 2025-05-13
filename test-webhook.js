@@ -25,10 +25,10 @@ const samples = {
             profile: {
               name: 'Test User'
             },
-            wa_id: '9876543210'
+            wa_id: '919886781317'
           }],
           messages: [{
-            from: '9876543210',
+            from: '919886781317',
             id: 'wamid.abcdefghijklmnopqrstuvwxyz',
             timestamp: Math.floor(Date.now() / 1000),
             text: {
@@ -57,7 +57,7 @@ const samples = {
             profile: {
               name: 'Test User'
             },
-            wa_id: '9876543210'
+            wa_id: '919886781317'
           }],
           shopping: {
             catalog_message: {
@@ -86,7 +86,7 @@ const samples = {
             profile: {
               name: 'Test User'
             },
-            wa_id: '9876543210'
+            wa_id: '919886781317'
           }],
           shopping: {
             product_inquiry: {
@@ -118,7 +118,7 @@ const samples = {
             profile: {
               name: 'Test User'
             },
-            wa_id: '9876543210'
+            wa_id: '919886781317'
           }],
           shopping: {
             order: {

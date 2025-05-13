@@ -48,10 +48,11 @@ async function authenticateWithIPOS() {
  * Format a WhatsApp order for iPOS API
  * @param {Object} order The WhatsApp order object
  * @param {string} waId The WhatsApp ID
- * @param {string} orderReference The order reference
+ * @param {string} orderReference The order reference ID
+ * @param {string} customerName Customer's profile name (optional)
  * @returns {Object} The formatted order for iPOS API
  */
-function formatOrderForIPOS(order, waId, orderReference) {
+function formatOrderForIPOS(order, waId, orderReference, customerName = '') {
   // Calculate total amount including all items
   // Handle both price formats (price or item_price)
   const totalAmount = order.product_items.reduce((total, item) => {
@@ -155,7 +156,7 @@ function formatOrderForIPOS(order, waId, orderReference) {
     "TableNo": 0,
     "TakeAway": 1, // WhatsApp orders are takeaway
     "Delivery": 0,
-    "Name": `WhatsApp-${waId}`,
+    "Name": customerName || `WhatsApp Customer`,
     "Address": "",
     "PhoneNo": waId,
     "Merged": 0,
@@ -192,7 +193,7 @@ function formatOrderForIPOS(order, waId, orderReference) {
     "TotCreditNote": 0,
     "CreditNoteRefNo": "",
     "ExtraDiscount": 0,
-    "OrderNote": `WhatsApp Order: ${orderReference}`,
+    "OrderNote": customerName ? `WhatsApp Order from ${customerName}: ${orderReference}` : `WhatsApp Order: ${orderReference}`,
     "DeliveryType": "",
     "DeliveryRemark": "",
     "PaymentList": paymentList,
@@ -205,9 +206,10 @@ function formatOrderForIPOS(order, waId, orderReference) {
  * @param {Object} order The WhatsApp order object
  * @param {string} waId The WhatsApp ID
  * @param {string} orderReference The order reference
+ * @param {string} customerName The customer's profile name (optional)
  * @returns {Promise<Object>} The result of the order processing
  */
-async function processOrderToiPOS(order, waId, orderReference) {
+async function processOrderToiPOS(order, waId, orderReference, customerName = '') {
   try {
     // Message log: Log start of processing
     logger.info(`Processing order ${orderReference} from ${waId} to iPOS system`);
@@ -227,7 +229,7 @@ async function processOrderToiPOS(order, waId, orderReference) {
     // We'll keep the code below for reference but skip token retrieval
 
     // Step 2: Format the order for iPOS
-    const formattedOrder = formatOrderForIPOS(order, waId, orderReference);
+    const formattedOrder = formatOrderForIPOS(order, waId, orderReference, customerName);
 
     // Step 3: Submit the order to iPOS
     logger.info(`Submitting order ${orderReference} to iPOS API...`);
