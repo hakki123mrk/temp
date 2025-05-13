@@ -150,7 +150,21 @@ async function processMessage(message, waId) {
       messageId: message.id,
       timestamp: message.timestamp
     });
-    // Here you could check for keywords like "menu", "order", etc.
+    // Check for keywords and send appropriate responses
+    const messageText = message.text.body.toLowerCase();
+
+    // Check for common keywords related to ordering
+    if (messageText.includes('menu') ||
+        messageText.includes('order') ||
+        messageText.includes('food') ||
+        messageText.includes('catalog') ||
+        messageText.includes('products')) {
+      // Send catalog message to the user
+      sendCatalogMessage(waId);
+    } else {
+      // For any other text message, send a welcome/catalog message
+      sendWelcomeMessage(waId);
+    }
 
   } else if (messageType === 'interactive') {
     logger.info(`Interactive message from ${waId}:`, {
@@ -713,7 +727,7 @@ async function sendOrderConfirmation(order, waId, orderResult = null, orderRefer
 async function sendWhatsAppMessage(to, message) {
   try {
     logger.debug(`Sending WhatsApp message to ${to}`, { messageLength: message.length });
-    
+
     const response = await axios({
       method: 'POST',
       url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
@@ -731,15 +745,181 @@ async function sendWhatsAppMessage(to, message) {
         }
       }
     });
-    
-    logger.info('Message sent successfully', { 
-      recipient: to, 
+
+    logger.info('Message sent successfully', {
+      recipient: to,
       messageId: response.data.messages?.[0]?.id
     });
     return response.data;
   } catch (error) {
     logger.error('Error sending WhatsApp message:', error.response?.data || error.message);
     throw error;
+  }
+}
+
+// Send Catalog Message Helper
+async function sendCatalogMessage(to) {
+  try {
+    logger.debug(`Sending catalog message to ${to}`);
+
+    // First, try using the template-based catalog message for better compatibility
+    try {
+      const response = await axios({
+        method: 'POST',
+        url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        data: {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: to,
+          type: 'template',
+          template: {
+            name: 'catalog_display',
+            language: {
+              code: 'en_US'
+            },
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  {
+                    type: 'text',
+                    text: 'our delicious menu'
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      });
+
+      logger.info('Template catalog message sent successfully', {
+        recipient: to,
+        messageId: response.data.messages?.[0]?.id
+      });
+      return response.data;
+
+    } catch (templateError) {
+      // If template approach fails, fallback to interactive catalog message
+      logger.warn('Template catalog message failed, trying interactive approach:',
+        templateError.response?.data?.error?.message || templateError.message);
+
+      const response = await axios({
+        method: 'POST',
+        url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        data: {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: to,
+          type: 'interactive',
+          interactive: {
+            type: 'catalog_message',
+            body: {
+              text: '🍽️ Browse our menu and place your order!'
+            },
+            action: {
+              name: 'catalog_message',
+              parameters: {
+                thumbnail_product_retailer_id: process.env.CATALOG_THUMBNAIL_ID || 'A001032',
+                catalog_id: process.env.WHATSAPP_CATALOG_ID || '649587371247572'
+              }
+            },
+            footer: {
+              text: 'Tap to browse our delicious menu'
+            }
+          }
+        }
+      });
+
+      logger.info('Interactive catalog message sent successfully', {
+        recipient: to,
+        messageId: response.data.messages?.[0]?.id
+      });
+      return response.data;
+    }
+  } catch (error) {
+    logger.error('Error sending catalog message:', error.response?.data || error.message);
+    // If all catalog approaches fail, send a simple text message instead
+    try {
+      await sendWhatsAppMessage(to, 'Thank you for your message! You can browse our menu and place your order through WhatsApp. Just tap on the "Catalog" button in our chat.');
+    } catch (fallbackError) {
+      logger.error('Error sending fallback message:', fallbackError.message);
+    }
+    throw error;
+  }
+}
+
+// Send Welcome Message Helper
+async function sendWelcomeMessage(to) {
+  try {
+    // Try to use a template for better deliverability
+    try {
+      const response = await axios({
+        method: 'POST',
+        url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        data: {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: to,
+          type: 'template',
+          template: {
+            name: 'welcome_message',
+            language: {
+              code: 'en_US'
+            },
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  {
+                    type: 'text',
+                    text: to.substring(to.length - 4) // Last 4 digits of phone number
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      });
+
+      logger.info('Template welcome message sent successfully', {
+        recipient: to,
+        messageId: response.data.messages?.[0]?.id
+      });
+
+    } catch (templateError) {
+      // If template fails, send a plain text welcome message
+      logger.warn('Template welcome message failed, sending plain text:',
+        templateError.response?.data?.error?.message || templateError.message);
+
+      const welcomeMessage = `👋 Welcome to our self-checkout service!\n\nYou can place an order directly through WhatsApp. Our menu is available in our catalog.\n\nType "menu" to see our food options, or simply tap the catalog button in our chat.`;
+
+      logger.debug(`Sending plain welcome message to ${to}`);
+      await sendWhatsAppMessage(to, welcomeMessage);
+    }
+
+    // Send catalog message after a short delay
+    setTimeout(async () => {
+      try {
+        await sendCatalogMessage(to);
+      } catch (error) {
+        logger.error('Error sending delayed catalog message:', error.message);
+      }
+    }, 2000);
+
+  } catch (error) {
+    logger.error('Error sending welcome message:', error.message);
   }
 }
 
