@@ -99,12 +99,20 @@ app.post('/webhook', (req, res) => {
       const messages = body.entry[0].changes[0].value.messages;
       const waId = body.entry[0].changes[0].value.contacts[0].wa_id;
       const metadata = body.entry[0].changes[0].value.metadata;
-      
-      logger.info(`Received ${messages.length} message(s) from ${waId}`, { metadata });
+
+      // Extract user profile name if available
+      let profileName = 'Unknown';
+      if (body.entry[0].changes[0].value.contacts &&
+          body.entry[0].changes[0].value.contacts[0].profile &&
+          body.entry[0].changes[0].value.contacts[0].profile.name) {
+        profileName = body.entry[0].changes[0].value.contacts[0].profile.name;
+      }
+
+      logger.info(`Received ${messages.length} message(s) from ${profileName} (${waId})`, { metadata });
       
       // Process each message (need to handle async for orders)
       // Use Promise.all to process messages in parallel
-      Promise.all(messages.map(message => processMessage(message, waId)))
+      Promise.all(messages.map(message => processMessage(message, waId, profileName)))
         .catch(error => {
           logger.error('Error processing messages:', error);
         });
@@ -141,11 +149,16 @@ app.post('/webhook', (req, res) => {
 });
 
 // Process Message Handler
-async function processMessage(message, waId) {
+async function processMessage(message, waId, profileName = 'Unknown') {
   const messageType = message.type;
 
+  // Get profile name from the message context if not provided
+  if (profileName === 'Unknown' && message.context && message.context.from) {
+    profileName = message.context.from;
+  }
+
   if (messageType === 'text') {
-    logger.info(`Text message from ${waId}:`, {
+    logger.info(`Text message from ${profileName} (${waId}):`, {
       text: message.text.body,
       messageId: message.id,
       timestamp: message.timestamp
@@ -163,11 +176,11 @@ async function processMessage(message, waId) {
       sendCatalogMessage(waId);
     } else {
       // For any other text message, send a welcome/catalog message
-      sendWelcomeMessage(waId);
+      sendWelcomeMessage(waId, profileName);
     }
 
   } else if (messageType === 'interactive') {
-    logger.info(`Interactive message from ${waId}:`, {
+    logger.info(`Interactive message from ${profileName} (${waId}):`, {
       interactiveType: message.interactive.type,
       messageId: message.id,
       timestamp: message.timestamp
@@ -192,7 +205,7 @@ async function processMessage(message, waId) {
     }
   } else if (messageType === 'order') {
     // Process WhatsApp order
-    logger.info(`Order message from ${waId}:`, {
+    logger.info(`Order message from ${profileName} (${waId}):`, {
       orderId: message.id,
       timestamp: message.timestamp
     });
@@ -207,13 +220,54 @@ async function processMessage(message, waId) {
       const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference);
 
       // Send order confirmation message with the result info
-      sendOrderConfirmation(order, waId, orderResult, orderReference);
+      sendOrderConfirmation(order, waId, orderResult, orderReference, profileName);
     } catch (error) {
       logger.error(`Error processing order workflow for ${orderReference}:`, error);
 
       // Send a basic confirmation even if processing failed
-      sendOrderConfirmation(order, waId, { success: false, error: error.message }, orderReference);
+      sendOrderConfirmation(order, waId, { success: false, error: error.message }, orderReference, profileName);
     }
+  } else if (messageType === 'location') {
+    // Process location messages
+    logger.info(`Location received from ${profileName} (${waId}):`, {
+      latitude: message.location.latitude,
+      longitude: message.location.longitude,
+      name: message.location.name || 'Unknown location',
+      address: message.location.address || 'No address provided'
+    });
+
+    // Send a response acknowledging receipt of location
+    const response = `Thank you for sharing your location!\n\nWould you like to see our menu and place an order?`;
+    await sendWhatsAppMessage(waId, response);
+
+    // Send catalog after a short delay
+    setTimeout(async () => {
+      try {
+        await sendCatalogMessage(waId);
+      } catch (error) {
+        logger.error('Error sending catalog after location message:', error.message);
+      }
+    }, 2000);
+
+  } else if (messageType === 'image' || messageType === 'video' || messageType === 'document') {
+    // Handle media messages
+    logger.info(`Media message (${messageType}) received from ${profileName} (${waId}):`, {
+      mediaId: message[messageType].id,
+      mimeType: message[messageType].mime_type || 'unknown'
+    });
+
+    // Send a friendly response
+    const response = `Thanks for the ${messageType}! If you'd like to place an order, please check our menu.`;
+    await sendWhatsAppMessage(waId, response);
+
+    // Send catalog after a short delay
+    setTimeout(async () => {
+      try {
+        await sendCatalogMessage(waId);
+      } catch (error) {
+        logger.error(`Error sending catalog after ${messageType} message:`, error.message);
+      }
+    }, 2000);
   }
 }
 
@@ -644,7 +698,7 @@ async function processOrderToiPOS(order, waId, orderReference) {
 }
 
 // Send Order Confirmation
-async function sendOrderConfirmation(order, waId, orderResult = null, orderReference = null) {
+async function sendOrderConfirmation(order, waId, orderResult = null, orderReference = null, customerName = '') {
   try {
     // Generate order summary
     const orderItems = order.product_items.map(item => {
@@ -664,6 +718,8 @@ async function sendOrderConfirmation(order, waId, orderResult = null, orderRefer
     const roundedVatAmount = Math.round(vatAmount * 100) / 100;
     const grandTotal = totalAmount + roundedVatAmount;
 
+    // Personalize greeting if customer name is available
+    const personalization = customerName ? `Dear ${customerName},\n\n` : '';
     let message = '';
 
     // Format the message based on order result
@@ -672,7 +728,7 @@ async function sendOrderConfirmation(order, waId, orderResult = null, orderRefer
       const invoiceNumber = orderResult.invoiceNumber;
       const estimatedTime = 20; // minutes - can be configured or calculated
 
-      message = `🎉 *Order Confirmed!* 🎉\n\n` +
+      message = `🎉 *Order Confirmed!* 🎉\n\n${personalization}` +
         `Thank you for your order! We've received it and it's being prepared.\n\n` +
         `*Order Reference:* ${orderReference}\n` +
         `*Invoice Number:* #${invoiceNumber}\n` +
@@ -857,10 +913,13 @@ async function sendCatalogMessage(to) {
 }
 
 // Send Welcome Message Helper
-async function sendWelcomeMessage(to) {
+async function sendWelcomeMessage(to, customerName = '') {
   try {
     // Try to use a template for better deliverability
     try {
+      // Use customer name if available, otherwise last 4 digits of phone number
+      const nameParam = customerName || to.substring(to.length - 4);
+
       const response = await axios({
         method: 'POST',
         url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
@@ -884,7 +943,7 @@ async function sendWelcomeMessage(to) {
                 parameters: [
                   {
                     type: 'text',
-                    text: to.substring(to.length - 4) // Last 4 digits of phone number
+                    text: nameParam
                   }
                 ]
               }
