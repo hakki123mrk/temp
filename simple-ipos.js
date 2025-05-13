@@ -285,8 +285,8 @@ async function processOrderToiPOS(order, waId, orderReference) {
 
     // Step 4: Process the response and handle success/failure
     if (response.data && response.data.Success) {
-      const invoiceNumber = response.data.data.InvNo;
-      
+      const invoiceNumber = response.data.data;
+
       // Message log for success
       logger.info(`Order ${orderReference} from ${waId} successfully submitted to iPOS. Invoice #${invoiceNumber} created.`);
       
@@ -315,7 +315,7 @@ async function processOrderToiPOS(order, waId, orderReference) {
       return {
         success: true,
         invoiceNumber: invoiceNumber,
-        invoiceData: response.data.data
+        invoiceData: response.data
       };
     } else {
       // Message log for failure

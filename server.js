@@ -485,11 +485,11 @@ async function processOrderToiPOS(order, waId, orderReference) {
 
     // Step 4: Process the response and handle success
     if (response.data && response.data.Success) {
-      const invoiceNumber = response.data.data.InvNo;
+      const invoiceNumber = response.data.data;
       logger.info(`Order ${orderReference} successfully submitted to iPOS. Invoice number: ${invoiceNumber}`);
 
       // Save the invoice data for reference
-      const invoiceData = response.data.data;
+      const invoiceData = response.data;
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `invoice-${invoiceNumber}-${orderReference}-${timestamp}.json`;
 
