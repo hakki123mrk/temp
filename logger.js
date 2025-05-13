@@ -67,20 +67,27 @@ const logger = createLogger({
 
 // Add method to log order details
 logger.logOrder = function(order, waId) {
-  // Map each product item with more details
-  const orderItems = order.product_items.map(item => ({
-    id: item.product_retailer_id, // iPOS product ID
-    name: item.name,
-    quantity: item.quantity,
-    price: item.price,
-    currency: item.currency,
-    subtotal: item.price * item.quantity,
-    description: item.description || ''
-  }));
+  // Map each product item with more details, supporting both formats
+  const orderItems = order.product_items.map(item => {
+    // Handle both formats (price vs item_price)
+    const price = item.price || item.item_price || 0;
+    const name = item.name || `Item ${item.product_retailer_id}`;
 
-  // Calculate order totals
+    return {
+      id: item.product_retailer_id, // iPOS product ID
+      name: name,
+      quantity: item.quantity,
+      price: price,
+      currency: item.currency,
+      subtotal: price * item.quantity,
+      description: item.description || ''
+    };
+  });
+
+  // Calculate order totals using the correct price field
   const totalAmount = order.product_items.reduce((total, item) => {
-    return total + (item.price * item.quantity);
+    const price = item.price || item.item_price || 0;
+    return total + (price * item.quantity);
   }, 0);
 
   // Calculate VAT amount (5% in UAE)

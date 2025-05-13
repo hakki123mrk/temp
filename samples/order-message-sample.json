@@ -1,0 +1,54 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "116072361595933",
+      "changes": [
+        {
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "971543228294",
+              "phone_number_id": "116206601581617"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Test Customer"
+                },
+                "wa_id": "919886781317"
+              }
+            ],
+            "messages": [
+              {
+                "from": "919886781317",
+                "id": "wamid.test123456789",
+                "timestamp": "1747139683",
+                "type": "order",
+                "order": {
+                  "catalog_id": "649587371247572",
+                  "text": "Special instructions: Please deliver quickly",
+                  "product_items": [
+                    {
+                      "product_retailer_id": "A001044",
+                      "quantity": 1,
+                      "item_price": 60,
+                      "currency": "AED"
+                    },
+                    {
+                      "product_retailer_id": "A001052",
+                      "quantity": 2,
+                      "item_price": 21,
+                      "currency": "AED"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "field": "messages"
+        }
+      ]
+    }
+  ]
+}

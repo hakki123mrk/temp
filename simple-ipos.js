@@ -53,8 +53,10 @@ async function authenticateWithIPOS() {
  */
 function formatOrderForIPOS(order, waId, orderReference) {
   // Calculate total amount including all items
+  // Handle both price formats (price or item_price)
   const totalAmount = order.product_items.reduce((total, item) => {
-    return total + (item.price * item.quantity);
+    const price = item.price || item.item_price || 0;
+    return total + (price * item.quantity);
   }, 0);
 
   // Calculate VAT amount (5% in UAE)
@@ -68,21 +70,25 @@ function formatOrderForIPOS(order, waId, orderReference) {
 
   // Create sales details array from order items - match Angular App format
   const salesDetails = order.product_items.map((item, index) => {
+    // Handle both price formats (price or item_price)
+    const price = item.price || item.item_price || 0;
+    const name = item.name || `Item ${item.product_retailer_id}`;
+
     return {
       "SlNo": index,
       "InvNo": 0,
       "Barcode": item.id || item.product_retailer_id || `item_${index}`, // Barcode format from catalog
       "Qty": item.quantity,
       "UnitId": 0,
-      "Rate": item.price,
+      "Rate": price,
       "Discount": 0,
       "BatchNo": "",
       "KitchenNote": "",
       "KotStatus": 0,
       "KotOrderTime": formattedDate,
-      "TypeCaption": item.name,
+      "TypeCaption": name,
       "LocId": process.env.IPOS_LOCATION_ID || 2,
-      "ActualRate": item.price,
+      "ActualRate": price,
       "SeatNo": 0,
       "KitchenNotes": [{
         "Barcode": "",
@@ -93,7 +99,7 @@ function formatOrderForIPOS(order, waId, orderReference) {
       "TaxDetails": [{
         "TaxPercent": 5,
         "Description": "TAX",
-        "TaxAmt": (5 * item.price * item.quantity / 100), // 5% VAT
+        "TaxAmt": (5 * price * item.quantity / 100), // 5% VAT
         "SlNo": 0,
         "InvNo": 0,
         "TaxId": 1,

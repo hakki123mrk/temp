@@ -102,10 +102,12 @@ app.post('/webhook', (req, res) => {
       
       logger.info(`Received ${messages.length} message(s) from ${waId}`, { metadata });
       
-      // Process each message
-      messages.forEach(message => {
-        processMessage(message, waId);
-      });
+      // Process each message (need to handle async for orders)
+      // Use Promise.all to process messages in parallel
+      Promise.all(messages.map(message => processMessage(message, waId)))
+        .catch(error => {
+          logger.error('Error processing messages:', error);
+        });
     } 
     // Check for shopping events (catalog, product inquiries, cart actions)
     else if (body.entry && 
@@ -139,40 +141,64 @@ app.post('/webhook', (req, res) => {
 });
 
 // Process Message Handler
-function processMessage(message, waId) {
+async function processMessage(message, waId) {
   const messageType = message.type;
-  
+
   if (messageType === 'text') {
-    logger.info(`Text message from ${waId}:`, { 
+    logger.info(`Text message from ${waId}:`, {
       text: message.text.body,
       messageId: message.id,
       timestamp: message.timestamp
     });
     // Here you could check for keywords like "menu", "order", etc.
-    
+
   } else if (messageType === 'interactive') {
-    logger.info(`Interactive message from ${waId}:`, { 
+    logger.info(`Interactive message from ${waId}:`, {
       interactiveType: message.interactive.type,
       messageId: message.id,
       timestamp: message.timestamp
     });
     // Handle button responses and list selections
-    
+
     if (message.interactive.type === 'button_reply') {
       // Handle button replies
       const buttonId = message.interactive.button_reply.id;
       const buttonText = message.interactive.button_reply.title;
       logger.info(`Button reply from ${waId}:`, { buttonId, buttonText });
-      
+
       // Process different button actions here
-      
+
     } else if (message.interactive.type === 'list_reply') {
       // Handle list selections
       const listId = message.interactive.list_reply.id;
       const listTitle = message.interactive.list_reply.title;
       logger.info(`List selection from ${waId}:`, { listId, listTitle });
-      
+
       // Process different list selections here
+    }
+  } else if (messageType === 'order') {
+    // Process WhatsApp order
+    logger.info(`Order message from ${waId}:`, {
+      orderId: message.id,
+      timestamp: message.timestamp
+    });
+
+    const order = message.order;
+    // Log order details
+    const orderReference = logger.logOrder(order, waId);
+
+    try {
+      // Process the order using the iPOS service
+      logger.info(`Processing order ${orderReference} from message handler...`);
+      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference);
+
+      // Send order confirmation message with the result info
+      sendOrderConfirmation(order, waId, orderResult, orderReference);
+    } catch (error) {
+      logger.error(`Error processing order workflow for ${orderReference}:`, error);
+
+      // Send a basic confirmation even if processing failed
+      sendOrderConfirmation(order, waId, { success: false, error: error.message }, orderReference);
     }
   }
 }
@@ -607,12 +633,15 @@ async function processOrderToiPOS(order, waId, orderReference) {
 async function sendOrderConfirmation(order, waId, orderResult = null, orderReference = null) {
   try {
     // Generate order summary
-    const orderItems = order.product_items.map(item =>
-      `• ${item.name} x${item.quantity} - ${item.price} ${item.currency}`
-    ).join('\n');
+    const orderItems = order.product_items.map(item => {
+      const price = item.price || item.item_price || 0;
+      const name = item.name || `Item ${item.product_retailer_id}`;
+      return `• ${name} x${item.quantity} - ${price} ${item.currency}`;
+    }).join('\n');
 
     const totalAmount = order.product_items.reduce((total, item) => {
-      return total + (item.price * item.quantity);
+      const price = item.price || item.item_price || 0;
+      return total + (price * item.quantity);
     }, 0);
 
     // Calculate VAT amount (5% in UAE)
