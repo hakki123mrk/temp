@@ -1,0 +1,13 @@
+{
+  "timestamp": "2025-05-13T11:50:44.187Z",
+  "orderReference": "WA-3210-044019",
+  "status": 200,
+  "statusText": "OK",
+  "data": {
+    "Success": false,
+    "error": {
+      "UsrMsg": "Counter is Not Open",
+      "DevMsg": "CounterOpId is Empty"
+    }
+  }
+}

@@ -170,7 +170,7 @@ async function sendTestEvent(eventType) {
 
     console.log(`Sending ${eventType} webhook event to local server...`);
     
-    const response = await axios.post('http://localhost:3000/webhook', payload, {
+    const response = await axios.post('http://localhost:4000/webhook', payload, {
       headers: {
         'Content-Type': 'application/json'
       }
@@ -181,7 +181,7 @@ async function sendTestEvent(eventType) {
   } catch (error) {
     console.error('Error sending test event:', error.message);
     if (error.code === 'ECONNREFUSED') {
-      console.error('Make sure your webhook server is running on http://localhost:3000');
+      console.error('Make sure your webhook server is running on http://localhost:4000');
     }
   }
 }

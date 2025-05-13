@@ -1,0 +1,11 @@
+{
+  "timestamp": "2025-05-13T11:42:22.524Z",
+  "type": "ERROR",
+  "orderReference": "WA-3210-542516",
+  "waId": "9876543210",
+  "errorMessage": "Invalid URL",
+  "errorType": "REQUEST_SETUP_ERROR",
+  "errorDetails": {
+    "message": "Invalid URL"
+  }
+}

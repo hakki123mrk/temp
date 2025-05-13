@@ -6,6 +6,7 @@ const logger = require('./logger');
 const eventLogger = require('./event-logger');
 const fs = require('fs');
 const path = require('path');
+const iposService = require('./simple-ipos');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -200,7 +201,7 @@ async function processShoppingEvent(shopping, waId, metadata) {
 
     try {
       // Process the order and get the result - pass the order reference for tracking
-      const orderResult = await processOrderToiPOS(order, waId, orderReference);
+      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference);
 
       // Send order confirmation message with the result info
       sendOrderConfirmation(order, waId, orderResult, orderReference);
@@ -218,6 +219,8 @@ async function authenticateWithIPOS() {
   try {
     logger.info('Authenticating with iPOS API');
 
+    const requestStartTime = Date.now();
+
     const response = await axios({
       method: 'POST',
       url: `${process.env.IPOS_API_URL}/Token`,
@@ -225,14 +228,70 @@ async function authenticateWithIPOS() {
       data: `username=${process.env.IPOS_USERNAME}&password=${process.env.IPOS_PASSWORD}&grant_type=password`
     });
 
+    const requestDuration = Date.now() - requestStartTime;
+
     if (response.data && response.data.access_token) {
-      logger.info('Successfully authenticated with iPOS API');
+      logger.info(`Successfully authenticated with iPOS API in ${requestDuration}ms`);
+
+      // Log successful authentication
+      const authLogEntry = {
+        timestamp: new Date().toISOString(),
+        event: 'AUTH_SUCCESS',
+        duration: requestDuration,
+        expiresAt: response.data['.expires'],
+        username: response.data.userName
+      };
+
+      // Save authentication log entry
+      const authLogFilename = 'ipos-auth.log';
+      fs.appendFileSync(
+        path.join(dataDir, authLogFilename),
+        JSON.stringify(authLogEntry) + '\n'
+      );
+
       return response.data.access_token;
     } else {
       throw new Error('Invalid authentication response from iPOS API');
     }
   } catch (error) {
-    logger.error('Error authenticating with iPOS API:', error.response?.data || error.message);
+    const errorDetails = error.response?.data || { error: error.message };
+    logger.error('Error authenticating with iPOS API:', errorDetails);
+
+    // Log authentication failure
+    const authLogEntry = {
+      timestamp: new Date().toISOString(),
+      event: 'AUTH_FAILURE',
+      error: error.message,
+      errorDetails: error.response?.data || {},
+      status: error.response?.status || 'NETWORK_ERROR'
+    };
+
+    // Save authentication log entry
+    const authLogFilename = 'ipos-auth.log';
+    fs.appendFileSync(
+      path.join(dataDir, authLogFilename),
+      JSON.stringify(authLogEntry) + '\n'
+    );
+
+    // Create an error file for detailed debugging
+    const errorFilename = `auth-error-${Date.now()}.json`;
+    fs.writeFileSync(
+      path.join(dataDir, errorFilename),
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        error: {
+          message: error.message,
+          stack: error.stack,
+          code: error.code,
+          response: error.response ? {
+            status: error.response.status,
+            data: error.response.data,
+            headers: error.response.headers
+          } : null
+        }
+      }, null, 2)
+    );
+
     throw error;
   }
 }
@@ -324,7 +383,7 @@ function formatOrderForIPOS(order, waId, orderReference) {
     "TableNo": 1,
     "TakeAway": 1,
     "Delivery": 1, // Mark as delivery order for WhatsApp
-    "Name": `WhatsApp Order: ${orderReference}`,
+    "Name": `${orderReference}`,
     "Address": "",
     "PhoneNo": waId,
     "Merged": 0,
@@ -401,12 +460,12 @@ async function processOrderToiPOS(order, waId, orderReference) {
     // Step 4: Process the response and handle success
     if (response.data && response.data.Success) {
       const invoiceNumber = response.data.data.InvNo;
-      logger.info(`Order successfully submitted to iPOS. Invoice number: ${invoiceNumber}`);
+      logger.info(`Order ${orderReference} successfully submitted to iPOS. Invoice number: ${invoiceNumber}`);
 
       // Save the invoice data for reference
       const invoiceData = response.data.data;
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const filename = `invoice-${invoiceNumber}-${timestamp}.json`;
+      const filename = `invoice-${invoiceNumber}-${orderReference}-${timestamp}.json`;
 
       fs.writeFileSync(
         path.join(dataDir, filename),
@@ -414,6 +473,27 @@ async function processOrderToiPOS(order, waId, orderReference) {
       );
 
       logger.debug(`Saved invoice data to ${filename}`);
+
+      // Create a separate iPOS transaction log for easier tracking
+      const txLogEntry = {
+        timestamp: new Date().toISOString(),
+        orderReference,
+        waId,
+        invoiceNumber,
+        totalAmount: totalAmount,
+        vatAmount: roundedVatAmount,
+        grandTotal: totalAmount + roundedVatAmount,
+        currency: order.product_items[0].currency,
+        items: order.product_items.length,
+        success: true
+      };
+
+      // Save transaction log entry in a dedicated file with append mode
+      const txLogFilename = 'ipos-transactions.log';
+      fs.appendFileSync(
+        path.join(dataDir, txLogFilename),
+        JSON.stringify(txLogEntry) + '\n'
+      );
 
       // Step 5 (optional): Send invoice for printing if needed
       // This would involve calling the text print and print endpoints
@@ -426,7 +506,26 @@ async function processOrderToiPOS(order, waId, orderReference) {
       };
     } else {
       // Handle unsuccessful response
-      logger.error('Failed to submit order to iPOS:', response.data);
+      logger.error(`Order ${orderReference} failed to submit to iPOS:`, response.data);
+
+      // Log the failure in the transaction log
+      const txLogEntry = {
+        timestamp: new Date().toISOString(),
+        orderReference,
+        waId,
+        success: false,
+        errorMessage: response.data?.message || 'Failed to submit order to iPOS',
+        totalAmount: totalAmount,
+        currency: order.product_items[0].currency
+      };
+
+      // Save transaction log entry in a dedicated file with append mode
+      const txLogFilename = 'ipos-transactions.log';
+      fs.appendFileSync(
+        path.join(dataDir, txLogFilename),
+        JSON.stringify(txLogEntry) + '\n'
+      );
+
       return {
         success: false,
         error: 'Failed to submit order to iPOS',
@@ -437,18 +536,65 @@ async function processOrderToiPOS(order, waId, orderReference) {
     // Detailed error logging
     if (error.response) {
       // The server responded with a status code outside the 2xx range
-      logger.error('Error from iPOS API:', {
+      logger.error(`Error from iPOS API for order ${orderReference}:`, {
         status: error.response.status,
         data: error.response.data,
         headers: error.response.headers
       });
     } else if (error.request) {
       // The request was made but no response was received
-      logger.error('No response received from iPOS API:', error.request);
+      logger.error(`No response received from iPOS API for order ${orderReference}:`, error.request);
     } else {
       // Something happened in setting up the request
-      logger.error('Error setting up iPOS API request:', error.message);
+      logger.error(`Error setting up iPOS API request for order ${orderReference}:`, error.message);
     }
+
+    // Log the failure in the transaction log
+    const errorType = error.response ? 'API_ERROR' :
+                     error.request ? 'CONNECTION_ERROR' : 'REQUEST_SETUP_ERROR';
+
+    const txLogEntry = {
+      timestamp: new Date().toISOString(),
+      orderReference,
+      waId,
+      success: false,
+      errorType,
+      errorMessage: error.message,
+      errorCode: error.response?.status || 'UNKNOWN',
+      totalAmount: totalAmount
+    };
+
+    // Save transaction log entry in a dedicated file with append mode
+    const txLogFilename = 'ipos-transactions.log';
+    fs.appendFileSync(
+      path.join(dataDir, txLogFilename),
+      JSON.stringify(txLogEntry) + '\n'
+    );
+
+    // Save raw error data for debugging
+    const errorFilename = `error-${orderReference}-${Date.now()}.json`;
+    fs.writeFileSync(
+      path.join(dataDir, errorFilename),
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        orderReference,
+        waId,
+        error: {
+          message: error.message,
+          stack: error.stack,
+          code: error.code,
+          response: error.response ? {
+            status: error.response.status,
+            data: error.response.data,
+            headers: error.response.headers
+          } : null,
+          request: error.request ? {
+            method: 'POST',
+            url: `${process.env.IPOS_API_URL}/services/api/rest/v1/Save_Sales`
+          } : null
+        }
+      }, null, 2)
+    );
 
     return {
       success: false,
