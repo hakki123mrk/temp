@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const logger = require('./logger');
+const productMapper = require('./product-mapper');
 
 // Create data directory for storing order logs if it doesn't exist
 const dataDir = path.join(__dirname, 'data');
@@ -73,12 +74,23 @@ function formatOrderForIPOS(order, waId, orderReference, customerName = '') {
   const salesDetails = order.product_items.map((item, index) => {
     // Handle both price formats (price or item_price)
     const price = item.price || item.item_price || 0;
-    const name = item.name || `Item ${item.product_retailer_id}`;
+
+    // Get product name from catalog if available
+    const productId = item.id || item.product_retailer_id;
+    let name;
+
+    if (productMapper.isProductCatalogLoaded()) {
+      // Use catalog mapping when available
+      name = productMapper.getProductName(productId, item.name);
+    } else {
+      // Fallback to item name or generic format
+      name = item.name || `Item ${productId}`;
+    }
 
     return {
       "SlNo": index,
       "InvNo": 0,
-      "Barcode": item.id || item.product_retailer_id || `item_${index}`, // Barcode format from catalog
+      "Barcode": productId || `item_${index}`, // Barcode format from catalog
       "Qty": item.quantity,
       "UnitId": 0,
       "Rate": price,
@@ -305,12 +317,22 @@ async function processOrderToiPOS(order, waId, orderReference, customerName = ''
           vatAmount: roundedVatAmount,
           grandTotal,
           currency: order.product_items[0].currency,
-          items: order.product_items.map(item => ({
-            id: item.product_retailer_id,
-            name: item.name,
-            quantity: item.quantity,
-            price: item.price
-          }))
+          items: order.product_items.map(item => {
+            const productId = item.product_retailer_id;
+            // Include both original and mapped names for comparison
+            const mappedName = productMapper.isProductCatalogLoaded()
+              ? productMapper.getProductName(productId)
+              : null;
+
+            return {
+              id: productId,
+              original_name: item.name,
+              mapped_name: mappedName,
+              display_name: mappedName || item.name || `Item ${productId}`,
+              quantity: item.quantity,
+              price: item.price || item.item_price
+            };
+          })
         }, null, 2)
       );
 

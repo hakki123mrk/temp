@@ -7,6 +7,7 @@ const eventLogger = require('./event-logger');
 const fs = require('fs');
 const path = require('path');
 const iposService = require('./simple-ipos');
+const productMapper = require('./product-mapper');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -708,10 +709,22 @@ async function processOrderToiPOS(order, waId, orderReference) {
 // Send Order Confirmation
 async function sendOrderConfirmation(order, waId, orderResult = null, orderReference = null, customerName = '') {
   try {
-    // Generate order summary
+    // Generate order summary with proper product names from catalog
     const orderItems = order.product_items.map(item => {
       const price = item.price || item.item_price || 0;
-      const name = item.name || `Item ${item.product_retailer_id}`;
+
+      // Get product name from catalog if available, otherwise use item.name or fallback
+      const productId = item.product_retailer_id;
+      let name;
+
+      if (productMapper.isProductCatalogLoaded()) {
+        // Use catalog mapping when available
+        name = productMapper.getProductName(productId, item.name);
+      } else {
+        // Fallback to item name or generic format
+        name = item.name || `Item ${productId}`;
+      }
+
       return `• ${name} x${item.quantity} - ${price} ${item.currency}`;
     }).join('\n');
 
@@ -1023,7 +1036,18 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   logger.info(`WhatsApp Webhook server running on port ${PORT}`);
   logger.info(`Full event logging is ${eventLogger.isEventLoggingEnabled() ? 'enabled' : 'disabled'}`);
+
+  // Ensure the catalog file is available locally
+  await productMapper.ensureLocalCatalogFile();
+
+  // Load product catalog for name mapping
+  try {
+    await productMapper.loadProductCatalog();
+    logger.info('Product catalog loaded successfully for name mapping');
+  } catch (error) {
+    logger.warn(`Failed to load product catalog: ${error.message}`);
+  }
 });
