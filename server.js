@@ -8,6 +8,92 @@ const fs = require('fs');
 const path = require('path');
 const iposService = require('./simple-ipos');
 const productMapper = require('./product-mapper');
+const admin = require('firebase-admin');
+const cors = require('cors');
+
+// Initialize Firebase Admin SDK
+let db; // Define db in wider scope to access across functions
+
+try {
+  // Check if service account key is provided via environment variable
+  const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+  if (serviceAccountPath) {
+    // Initialize with service account file if path is provided
+    admin.initializeApp({
+      credential: admin.credential.cert(require(serviceAccountPath))
+    });
+    logger.info('Firebase initialized with service account file');
+  } else {
+    // Try to initialize with application default credentials
+    admin.initializeApp();
+    logger.info('Firebase initialized with application default credentials');
+  }
+
+  // Get Firestore instance
+  db = admin.firestore();
+  logger.info('Firestore initialized successfully');
+} catch (error) {
+  logger.error('Firebase initialization error:', error);
+}
+
+// Helper function to save message to Firestore
+async function saveMessageToFirestore(message, waId, profileName = 'Unknown') {
+  if (!db) {
+    logger.error('Cannot save message to Firestore: Firebase not initialized');
+    return;
+  }
+
+  try {
+    // Prepare message data for Firestore
+    const messageData = {
+      from: waId,
+      timestamp: admin.firestore.Timestamp.now(),
+      messageId: message.id,
+      type: message.type,
+      senderName: profileName,
+      // Store message content based on type
+      text: message.type === 'text' ? message.text?.body || '' : '',
+      // Store raw data for reference
+      rawData: message
+    };
+
+    // Add to Firestore messages collection
+    const result = await db.collection('messages').add(messageData);
+    logger.info(`Message from ${waId} saved to Firestore with ID: ${result.id}`);
+
+    // Update contact's last message time
+    await updateContactInFirestore(waId, profileName);
+
+    return result.id;
+  } catch (error) {
+    logger.error('Error saving message to Firestore:', error);
+  }
+}
+
+// Helper function to update contact in Firestore
+async function updateContactInFirestore(waId, profileName = 'Unknown') {
+  if (!db) {
+    logger.error('Cannot update contact in Firestore: Firebase not initialized');
+    return;
+  }
+
+  try {
+    // Calculate 24-hour window information
+    const now = admin.firestore.Timestamp.now();
+
+    // Save/update contact in Firestore
+    await db.collection('contacts').doc(waId).set({
+      phoneNumber: waId,
+      profileName: profileName !== 'Unknown' ? profileName : '',
+      lastMessageTime: now
+    }, { merge: true });
+
+    logger.info(`Contact ${waId} updated in Firestore`);
+  } catch (error) {
+    logger.error('Error updating contact in Firestore:', error);
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -24,18 +110,25 @@ if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir);
 }
 
+// Enable CORS for the API (especially important for the dashboard)
+app.use(cors({
+  origin: process.env.CORS_ALLOW_ORIGIN || '*', // Allow all origins by default or specify in .env
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 // Middleware to parse JSON
 app.use(bodyParser.json());
 
 // Middleware to log all requests
 app.use((req, res, next) => {
   const startTime = Date.now();
-  
+
   res.on('finish', () => {
     const duration = Date.now() - startTime;
     logger.http(`${req.method} ${req.url} ${res.statusCode} - ${duration}ms`);
   });
-  
+
   next();
 });
 
@@ -164,6 +257,13 @@ async function processMessage(message, waId, profileName = 'Unknown') {
   // Get profile name from the message context if not provided
   if (profileName === 'Unknown' && message.context && message.context.from) {
     profileName = message.context.from;
+  }
+
+  // Save message to Firestore for dashboard display
+  try {
+    await saveMessageToFirestore(message, waId, profileName);
+  } catch (error) {
+    logger.error('Error saving message to Firestore in process handler:', error);
   }
 
   if (messageType === 'text') {
@@ -801,9 +901,41 @@ async function sendOrderConfirmation(order, waId, orderResult = null, orderRefer
 }
 
 // Send WhatsApp Message Helper
-async function sendWhatsAppMessage(to, message) {
+async function sendWhatsAppMessage(to, message, options = {}) {
   try {
     logger.debug(`Sending WhatsApp message to ${to}`, { messageLength: message.length });
+
+    // Prepare the message payload based on message type
+    let messageData = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: to
+    };
+
+    // Handle different message types (text, template, interactive, etc.)
+    if (options.type === 'template') {
+      // Template message
+      messageData.type = 'template';
+      messageData.template = options.template;
+    } else if (options.type === 'interactive') {
+      // Interactive message
+      messageData.type = 'interactive';
+      messageData.interactive = options.interactive;
+    } else {
+      // Default to text message
+      messageData.type = 'text';
+      messageData.text = {
+        body: message,
+        preview_url: options.preview_url || false
+      };
+    }
+
+    // Add optional context for replies
+    if (options.context_message_id) {
+      messageData.context = {
+        message_id: options.context_message_id
+      };
+    }
 
     const response = await axios({
       method: 'POST',
@@ -812,16 +944,32 @@ async function sendWhatsAppMessage(to, message) {
         'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
-      data: {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: to,
-        type: 'text',
-        text: {
-          body: message
-        }
-      }
+      data: messageData
     });
+
+    // Save sent message to Firestore if Firebase is initialized
+    if (db) {
+      try {
+        const sentMessageData = {
+          to: to,
+          timestamp: admin.firestore.Timestamp.now(),
+          messageId: response.data.messages?.[0]?.id,
+          type: messageData.type,
+          content: message,
+          direction: 'outbound',
+          status: 'sent',
+          metadata: {
+            ...options,
+            response: response.data
+          }
+        };
+
+        await db.collection('messages').add(sentMessageData);
+        logger.debug('Sent message saved to Firestore');
+      } catch (firestoreErr) {
+        logger.error('Error saving sent message to Firestore:', firestoreErr);
+      }
+    }
 
     logger.info('Message sent successfully', {
       recipient: to,
@@ -1024,6 +1172,73 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     eventLoggingEnabled: eventLogger.isEventLoggingEnabled()
   });
+});
+
+// API endpoint for sending message replies
+app.post('/api/send-message', async (req, res) => {
+  try {
+    // Check for required fields
+    const { to, message, context_message_id } = req.body;
+
+    if (!to || !message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: to and message are required'
+      });
+    }
+
+    // Check phone number format
+    if (!to.match(/^\d+$/)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number format. Only digits allowed.'
+      });
+    }
+
+    // Prepare options for sending message
+    const options = {};
+
+    // Add message context if provided (for replies)
+    if (context_message_id) {
+      options.context_message_id = context_message_id;
+    }
+
+    // Add preview URL capability if specified
+    if (req.body.preview_url === true) {
+      options.preview_url = true;
+    }
+
+    // Handle message type (defaults to text)
+    if (req.body.type && ['template', 'interactive'].includes(req.body.type)) {
+      options.type = req.body.type;
+
+      if (req.body.type === 'template' && req.body.template) {
+        options.template = req.body.template;
+      } else if (req.body.type === 'interactive' && req.body.interactive) {
+        options.interactive = req.body.interactive;
+      }
+    }
+
+    // Send the message
+    const result = await sendWhatsAppMessage(to, message, options);
+
+    // Return success response
+    res.status(200).json({
+      success: true,
+      message_id: result.messages?.[0]?.id,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    logger.error('Error handling send-message request:', error);
+
+    // Return error response
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data || {}
+    });
+  }
 });
 
 // Handle uncaught exceptions

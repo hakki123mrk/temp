@@ -1,0 +1,132 @@
+{
+    "version": "7.0",
+    "screens": [
+        {
+            "id": "WELCOME_SCREEN",
+            "title": "Welcome",
+            "terminal": false,
+            "data": {},
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "TextHeading",
+                        "text": "Delivery Address"
+                    },
+                    {
+                        "type": "TextBody",
+                        "text": "Please provide your delivery address so we can accurately deliver your order."
+                    },
+                    {
+                        "type": "Footer",
+                        "label": "Continue",
+                        "on-click-action": {
+                            "name": "navigate",
+                            "next": { 
+                                "type": "screen", 
+                                "name": "ADDRESS_SCREEN" 
+                            },
+                            "payload": {}
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "ADDRESS_SCREEN",
+            "title": "Address Details",
+            "terminal": false,
+            "data": {},
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "TextHeading",
+                        "text": "Enter Your Address"
+                    },
+                    {
+                        "type": "TextArea",
+                        "name": "delivery_address",
+                        "required": true,
+                        "label": "Full Delivery Address"
+                    },
+                    {
+                        "type": "Footer",
+                        "label": "Continue",
+                        "on-click-action": {
+                            "name": "navigate",
+                            "next": { 
+                                "type": "screen", 
+                                "name": "CONFIRMATION_SCREEN" 
+                            },
+                            "payload": {}
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "CONFIRMATION_SCREEN",
+            "title": "Confirm Address",
+            "terminal": false,
+            "data": {},
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "TextHeading",
+                        "text": "Confirm Your Delivery Address"
+                    },
+                    {
+                        "type": "TextBody",
+                        "text": "Please review your address information:"
+                    },
+                    {
+                        "type": "TextBody",
+                        "text": "${delivery_address}"
+                    },
+                    {
+                        "type": "Footer",
+                        "label": "Confirm & Save",
+                        "on-click-action": {
+                            "name": "navigate",
+                            "next": { 
+                                "type": "screen", 
+                                "name": "THANK_YOU_SCREEN" 
+                            },
+                            "payload": {}
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "THANK_YOU_SCREEN",
+            "title": "Thank You",
+            "terminal": true,
+            "success": true,
+            "data": {},
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "TextHeading",
+                        "text": "Address Saved Successfully!"
+                    },
+                    {
+                        "type": "TextBody",
+                        "text": "Thank you! Your delivery address has been saved. We'll use this for your current and future orders."
+                    },
+                    {
+                        "type": "Footer",
+                        "label": "Complete",
+                        "on-click-action": {
+                            "name": "complete",
+                            "payload": {}
+                        }
+                    }
+                ]
+            }
+        }
+    ]
+}
