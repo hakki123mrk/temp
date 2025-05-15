@@ -167,10 +167,10 @@ app.post('/webhook', (req, res) => {
   
   // Log all webhook events to a separate file with headers if enabled
   eventLogger.logWebhookEvent(body, req.headers);
-  
+
   // Log the webhook event with the regular logger
   logger.logWebhookEvent(body);
-  
+
   // Store raw webhook payload for debugging if event logging is not enabled
   if (process.env.ENABLE_FULL_EVENT_LOGGING !== 'true') {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -184,12 +184,28 @@ app.post('/webhook', (req, res) => {
 
   // Check if this is a WhatsApp Business Account Message
   if (body.object) {
-    if (body.entry && 
-        body.entry[0].changes && 
-        body.entry[0].changes[0] && 
+    // Check for message status updates
+    if (body.entry &&
+        body.entry[0].changes &&
+        body.entry[0].changes[0] &&
+        body.entry[0].changes[0].value &&
+        body.entry[0].changes[0].value.statuses) {
+
+      const statuses = body.entry[0].changes[0].value.statuses;
+
+      // Process each status update
+      Promise.all(statuses.map(status => processMessageStatus(status)))
+        .catch(error => {
+          logger.error('Error processing message statuses:', error);
+        });
+    }
+    // Check for incoming messages
+    else if (body.entry &&
+        body.entry[0].changes &&
+        body.entry[0].changes[0] &&
         body.entry[0].changes[0].value &&
         body.entry[0].changes[0].value.messages) {
-      
+
       const messages = body.entry[0].changes[0].value.messages;
       const waId = body.entry[0].changes[0].value.contacts[0].wa_id;
       const metadata = body.entry[0].changes[0].value.metadata;
@@ -203,21 +219,21 @@ app.post('/webhook', (req, res) => {
       }
 
       logger.info(`Received ${messages.length} message(s) from ${profileName} (${waId})`, { metadata });
-      
+
       // Process each message (need to handle async for orders)
       // Use Promise.all to process messages in parallel
       Promise.all(messages.map(message => processMessage(message, waId, profileName)))
         .catch(error => {
           logger.error('Error processing messages:', error);
         });
-    } 
+    }
     // Check for shopping events (catalog, product inquiries, cart actions)
-    else if (body.entry && 
-             body.entry[0].changes && 
-             body.entry[0].changes[0] && 
+    else if (body.entry &&
+             body.entry[0].changes &&
+             body.entry[0].changes[0] &&
              body.entry[0].changes[0].value &&
              body.entry[0].changes[0].value.shopping) {
-      
+
       const shoppingData = body.entry[0].changes[0].value.shopping;
       const metadata = body.entry[0].changes[0].value.metadata;
       let waId = ''; 
@@ -249,6 +265,76 @@ app.post('/webhook', (req, res) => {
     }
   }
 });
+
+// Process Message Status Updates
+async function processMessageStatus(status) {
+  try {
+    // Extract status information
+    const messageId = status.id;
+    const statusType = status.status; // sent, delivered, read, etc.
+    const timestamp = status.timestamp ? new Date(parseInt(status.timestamp) * 1000) : new Date();
+    const recipientId = status.recipient_id;
+
+    logger.info(`Processing message status update: ${statusType} for message ${messageId} to ${recipientId}`);
+
+    // Skip processing if Firestore is not initialized
+    if (!db) {
+      logger.warn('Skipping status update: Firestore not initialized');
+      return;
+    }
+
+    // Find the message in Firestore
+    const messagesRef = db.collection('messages');
+    const query = messagesRef.where('messageId', '==', messageId);
+    const snapshot = await query.get();
+
+    if (snapshot.empty) {
+      logger.warn(`No message found with ID ${messageId} for status update`);
+      return;
+    }
+
+    // Update status in all matching messages (should typically be just one)
+    const batch = db.batch();
+
+    snapshot.forEach(doc => {
+      const messageData = doc.data();
+
+      // Only update if this is a newer status than what's recorded
+      const currentStatusPriority = getStatusPriority(messageData.status || 'unknown');
+      const newStatusPriority = getStatusPriority(statusType);
+
+      if (newStatusPriority > currentStatusPriority) {
+        logger.debug(`Updating message ${messageId} status from ${messageData.status || 'unknown'} to ${statusType}`);
+
+        batch.update(doc.ref, {
+          status: statusType,
+          statusTimestamp: admin.firestore.Timestamp.fromDate(timestamp),
+          statusDetails: status
+        });
+      }
+    });
+
+    // Commit the batch update
+    await batch.commit();
+    logger.debug(`Status update for message ${messageId} completed`);
+  } catch (error) {
+    logger.error('Error processing message status:', error);
+  }
+}
+
+// Helper function to determine status priority
+function getStatusPriority(status) {
+  const priorities = {
+    'unknown': 0,
+    'queued': 1,
+    'sent': 2,
+    'delivered': 3,
+    'read': 4,
+    'failed': 5
+  };
+
+  return priorities[status.toLowerCase()] || 0;
+}
 
 // Process Message Handler
 async function processMessage(message, waId, profileName = 'Unknown') {
@@ -951,17 +1037,18 @@ async function sendWhatsAppMessage(to, message, options = {}) {
     if (db) {
       try {
         const sentMessageData = {
+          from: process.env.WHATSAPP_PHONE_NUMBER_ID || 'bot',
           to: to,
           timestamp: admin.firestore.Timestamp.now(),
           messageId: response.data.messages?.[0]?.id,
           type: messageData.type,
-          content: message,
-          direction: 'outbound',
-          status: 'sent',
-          metadata: {
-            ...options,
+          text: messageData.type === 'text' ? message : '',
+          rawData: {
+            ...messageData,
             response: response.data
-          }
+          },
+          direction: 'outbound',
+          status: 'sent'
         };
 
         await db.collection('messages').add(sentMessageData);
@@ -1174,16 +1261,157 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API endpoint for sending message replies
-app.post('/api/send-message', async (req, res) => {
-  try {
-    // Check for required fields
-    const { to, message, context_message_id } = req.body;
+// API health check endpoint for the frontend to test connectivity
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    apiVersion: '1.0',
+    features: {
+      messaging: true,
+      fileAttachments: false
+    },
+    timestamp: new Date().toISOString()
+  });
+});
 
-    if (!to || !message) {
+// API endpoint for sending message replies
+// API endpoint to clear chats for a contact
+app.delete('/api/messages/:phoneNumber', async (req, res) => {
+  try {
+    const { phoneNumber } = req.params;
+
+    if (!phoneNumber) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: to and message are required'
+        error: 'Phone number is required'
+      });
+    }
+
+    if (!db) {
+      return res.status(500).json({
+        success: false,
+        error: 'Firebase not initialized'
+      });
+    }
+
+    logger.info(`Clearing messages for ${phoneNumber}`);
+
+    // Find all messages for this contact
+    const messagesRef = db.collection('messages');
+    const snapshot = await messagesRef
+      .where('from', '==', phoneNumber)
+      .get();
+
+    const outboundSnapshot = await messagesRef
+      .where('to', '==', phoneNumber)
+      .get();
+
+    // Batch delete all matching messages
+    const batch = db.batch();
+
+    // Delete inbound messages
+    snapshot.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
+    // Delete outbound messages
+    outboundSnapshot.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
+    // Commit the batch
+    await batch.commit();
+
+    res.status(200).json({
+      success: true,
+      deletedCount: snapshot.size + outboundSnapshot.size
+    });
+  } catch (error) {
+    logger.error('Error clearing messages:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// API endpoint to delete a contact
+app.delete('/api/contacts/:phoneNumber', async (req, res) => {
+  try {
+    const { phoneNumber } = req.params;
+
+    if (!phoneNumber) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number is required'
+      });
+    }
+
+    if (!db) {
+      return res.status(500).json({
+        success: false,
+        error: 'Firebase not initialized'
+      });
+    }
+
+    logger.info(`Deleting contact ${phoneNumber}`);
+
+    // Delete the contact from Firestore
+    await db.collection('contacts').doc(phoneNumber).delete();
+
+    // Delete all messages for this contact as well
+    // Find all messages for this contact
+    const messagesRef = db.collection('messages');
+    const snapshot = await messagesRef
+      .where('from', '==', phoneNumber)
+      .get();
+
+    const outboundSnapshot = await messagesRef
+      .where('to', '==', phoneNumber)
+      .get();
+
+    // Batch delete all matching messages
+    const batch = db.batch();
+
+    // Delete inbound messages
+    snapshot.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
+    // Delete outbound messages
+    outboundSnapshot.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
+    // Commit the batch
+    await batch.commit();
+
+    res.status(200).json({
+      success: true,
+      deletedMessages: snapshot.size + outboundSnapshot.size
+    });
+  } catch (error) {
+    logger.error('Error deleting contact:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.post('/api/send-message', async (req, res) => {
+  try {
+    // Log the request body for debugging
+    logger.info('Received send-message request:', { body: req.body });
+
+    // Check for required fields and handle different types of messages
+    const { to, message, context_message_id, type, interactive, template } = req.body;
+
+    if (!to) {
+      logger.error('Missing required field: to');
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: to is required'
       });
     }
 
@@ -1208,19 +1436,88 @@ app.post('/api/send-message', async (req, res) => {
       options.preview_url = true;
     }
 
-    // Handle message type (defaults to text)
-    if (req.body.type && ['template', 'interactive'].includes(req.body.type)) {
-      options.type = req.body.type;
+    // Handle interactive and template messages
+    if (type && ['template', 'interactive'].includes(type)) {
+      options.type = type;
 
-      if (req.body.type === 'template' && req.body.template) {
-        options.template = req.body.template;
-      } else if (req.body.type === 'interactive' && req.body.interactive) {
-        options.interactive = req.body.interactive;
+      if (type === 'template' && template) {
+        options.template = template;
+      } else if (type === 'interactive' && interactive) {
+        options.interactive = interactive;
       }
     }
 
+    // For text messages, ensure we have content
+    if (type !== 'interactive' && type !== 'template' && !message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: message is required for text messages'
+      });
+    }
+
     // Send the message
-    const result = await sendWhatsAppMessage(to, message, options);
+    let result;
+
+    if (type === 'interactive' && interactive) {
+      // For interactive messages, we need special handling
+      logger.info('Sending interactive message to', to, { interactive });
+
+      // Prepare message payload
+      const messageData = {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: to,
+        type: 'interactive',
+        interactive: interactive
+      };
+
+      // Add context for replies if needed
+      if (context_message_id) {
+        messageData.context = {
+          message_id: context_message_id
+        };
+      }
+
+      // Make API call
+      const response = await axios({
+        method: 'POST',
+        url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        data: messageData
+      });
+
+      result = response.data;
+
+      // Save to Firestore if initialized
+      if (db) {
+        try {
+          const sentMessageData = {
+            from: process.env.WHATSAPP_PHONE_NUMBER_ID || 'bot',
+            to: to,
+            timestamp: admin.firestore.Timestamp.now(),
+            messageId: result.messages?.[0]?.id,
+            type: 'interactive',
+            text: '[Interactive message]',
+            rawData: {
+              ...messageData,
+              response: result
+            },
+            direction: 'outbound',
+            status: 'sent'
+          };
+
+          await db.collection('messages').add(sentMessageData);
+        } catch (firestoreErr) {
+          logger.error('Error saving interactive message to Firestore:', firestoreErr);
+        }
+      }
+    } else {
+      // For regular messages
+      result = await sendWhatsAppMessage(to, message || '', options);
+    }
 
     // Return success response
     res.status(200).json({
