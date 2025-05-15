@@ -14,30 +14,59 @@ if (!fs.existsSync(logDir)) {
 const logFormat = printf(({ level, message, timestamp, ...metadata }) => {
   let meta = '';
   if (Object.keys(metadata).length > 0) {
-    meta = JSON.stringify(metadata, null, 2);
+    // Limit large metadata objects to prevent excessive logging
+    const cleanMetadata = {};
+    Object.keys(metadata).forEach(key => {
+      // Skip large objects or those that might cause circular references
+      if (key === 'rawData' || key === 'headers' || key === 'response') {
+        cleanMetadata[key] = '[Large object - not serialized]';
+      } else if (typeof metadata[key] === 'object' && metadata[key] !== null) {
+        try {
+          // Try to serialize, but limit size
+          const serialized = JSON.stringify(metadata[key]);
+          cleanMetadata[key] = serialized.length > 1000 ?
+            serialized.substring(0, 997) + '...' :
+            metadata[key];
+        } catch (e) {
+          cleanMetadata[key] = '[Unserializable object]';
+        }
+      } else {
+        cleanMetadata[key] = metadata[key];
+      }
+    });
+
+    try {
+      meta = JSON.stringify(cleanMetadata, null, 2);
+    } catch (e) {
+      meta = '{ "error": "Could not serialize metadata" }';
+    }
   }
-  
+
   return `${timestamp} [${level}]: ${message} ${meta}`;
 });
 
-// Create daily rotate file transport
+// Get retention period from environment or default to 12h
+const retentionHours = parseInt(process.env.LOG_RETENTION_HOURS || '12', 10);
+const retentionPeriod = `${retentionHours}h`;
+
+// Create daily rotate file transport - only if Firebase fails or for critical messages
 const fileRotateTransport = new transports.DailyRotateFile({
   filename: path.join(logDir, 'whatsapp-webhook-%DATE%.log'),
-  datePattern: 'YYYY-MM-DD',
-  maxFiles: '14d',
-  maxSize: '20m',
+  datePattern: 'YYYY-MM-DD-HH',
+  maxFiles: retentionPeriod,
+  maxSize: '10m',
   format: combine(
     timestamp(),
     logFormat
   )
 });
 
-// Create a separate transport for error logs
+// Create a separate transport for error logs - always active
 const errorFileRotateTransport = new transports.DailyRotateFile({
   filename: path.join(logDir, 'whatsapp-webhook-error-%DATE%.log'),
-  datePattern: 'YYYY-MM-DD',
-  maxFiles: '14d',
-  maxSize: '20m',
+  datePattern: 'YYYY-MM-DD-HH',
+  maxFiles: retentionPeriod,
+  maxSize: '10m',
   level: 'error',
   format: combine(
     timestamp(),
@@ -45,7 +74,7 @@ const errorFileRotateTransport = new transports.DailyRotateFile({
   )
 });
 
-// Create combined logger with console and file transports
+// Create console-only logger by default
 const logger = createLogger({
   level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
   format: combine(
@@ -59,11 +88,17 @@ const logger = createLogger({
         timestamp(),
         logFormat
       )
-    }),
-    fileRotateTransport,
-    errorFileRotateTransport
+    })
   ]
 });
+
+// Only add file transports if environment variable is set or we're in fallback mode
+if (process.env.USE_FILE_LOGGING === 'true' || process.env.FIREBASE_FALLBACK === 'true') {
+  logger.add(fileRotateTransport);
+}
+
+// Always add error logging to disk for troubleshooting
+logger.add(errorFileRotateTransport);
 
 // Add method to log order details
 logger.logOrder = function(order, waId) {

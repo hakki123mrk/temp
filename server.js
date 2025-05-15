@@ -165,21 +165,28 @@ app.post('/webhook', (req, res) => {
 
   const body = req.body;
   
-  // Log all webhook events to a separate file with headers if enabled
-  eventLogger.logWebhookEvent(body, req.headers);
-
-  // Log the webhook event with the regular logger
+  // Log the webhook event with the regular logger (basic info only)
   logger.logWebhookEvent(body);
 
-  // Store raw webhook payload for debugging if event logging is not enabled
-  if (process.env.ENABLE_FULL_EVENT_LOGGING !== 'true') {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `webhook-${timestamp}.json`;
-    fs.writeFileSync(
-      path.join(dataDir, filename),
-      JSON.stringify(body, null, 2)
-    );
-    logger.debug(`Stored webhook payload in ${filename}`);
+  // Save detailed event data to Firebase first, with file storage as fallback
+  eventLogger.logWebhookEvent(body, req.headers)
+    .catch(error => logger.error('Error in event logging workflow:', error));
+
+  // Store critical webhook payloads to disk only if Firebase is unavailable and event logging is disabled
+  if (process.env.ENABLE_FULL_EVENT_LOGGING !== 'true' && process.env.FIREBASE_FALLBACK === 'true') {
+    // Only store critical events like orders
+    const isOrderEvent = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.type === 'order' ||
+                         body.entry?.[0]?.changes?.[0]?.value?.shopping?.order !== undefined;
+
+    if (isOrderEvent) {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `order-${timestamp}.json`;
+      fs.writeFileSync(
+        path.join(dataDir, filename),
+        JSON.stringify(body, null, 2)
+      );
+      logger.debug(`Stored order payload in ${filename} (Firebase unavailable)`);
+    }
   }
 
   // Check if this is a WhatsApp Business Account Message
@@ -368,54 +375,9 @@ async function processMessage(message, waId, profileName = 'Unknown') {
     logger.error('Error saving message to Firestore in process handler:', error);
   }
 
-  if (messageType === 'text') {
-    logger.info(`Text message from ${profileName} (${waId}):`, {
-      text: message.text.body,
-      messageId: message.id,
-      timestamp: message.timestamp
-    });
-    // Check for keywords and send appropriate responses
-    const messageText = message.text.body.toLowerCase();
-
-    // Check for common keywords related to ordering
-    if (messageText.includes('menu') ||
-        messageText.includes('order') ||
-        messageText.includes('food') ||
-        messageText.includes('catalog') ||
-        messageText.includes('products')) {
-      // Send catalog message to the user
-      sendCatalogMessage(waId);
-    } else {
-      // For any other text message, send a welcome/catalog message
-      sendWelcomeMessage(waId, profileName);
-    }
-
-  } else if (messageType === 'interactive') {
-    logger.info(`Interactive message from ${profileName} (${waId}):`, {
-      interactiveType: message.interactive.type,
-      messageId: message.id,
-      timestamp: message.timestamp
-    });
-    // Handle button responses and list selections
-
-    if (message.interactive.type === 'button_reply') {
-      // Handle button replies
-      const buttonId = message.interactive.button_reply.id;
-      const buttonText = message.interactive.button_reply.title;
-      logger.info(`Button reply from ${waId}:`, { buttonId, buttonText });
-
-      // Process different button actions here
-
-    } else if (message.interactive.type === 'list_reply') {
-      // Handle list selections
-      const listId = message.interactive.list_reply.id;
-      const listTitle = message.interactive.list_reply.title;
-      logger.info(`List selection from ${waId}:`, { listId, listTitle });
-
-      // Process different list selections here
-    }
-  } else if (messageType === 'order') {
-    // Process WhatsApp order
+  // Process message based on type
+  if (messageType === 'order') {
+    // Special handling for order messages
     logger.info(`Order message from ${profileName} (${waId}):`, {
       orderId: message.id,
       timestamp: message.timestamp
@@ -438,47 +400,107 @@ async function processMessage(message, waId, profileName = 'Unknown') {
       // Send a basic confirmation even if processing failed
       sendOrderConfirmation(order, waId, { success: false, error: error.message }, orderReference, profileName);
     }
-  } else if (messageType === 'location') {
-    // Process location messages
-    logger.info(`Location received from ${profileName} (${waId}):`, {
-      latitude: message.location.latitude,
-      longitude: message.location.longitude,
-      name: message.location.name || 'Unknown location',
-      address: message.location.address || 'No address provided'
-    });
+  } else {
+    // Handle all non-order message types with appropriate messages and catalog
 
-    // Send a response acknowledging receipt of location
-    const response = `Thank you for sharing your location!\n\nWould you like to see our menu and place an order?`;
-    await sendWhatsAppMessage(waId, response);
+    // Log the message based on type
+    if (messageType === 'text') {
+      logger.info(`Text message from ${profileName} (${waId}):`, {
+        text: message.text.body,
+        messageId: message.id,
+        timestamp: message.timestamp
+      });
 
-    // Send catalog after a short delay
-    setTimeout(async () => {
-      try {
-        await sendCatalogMessage(waId);
-      } catch (error) {
-        logger.error('Error sending catalog after location message:', error.message);
+      const messageText = message.text.body.toLowerCase();
+
+      // Check for common keywords related to ordering
+      if (messageText.includes('menu') ||
+          messageText.includes('order') ||
+          messageText.includes('food') ||
+          messageText.includes('catalog') ||
+          messageText.includes('products')) {
+        // For menu or ordering keywords, send catalog message directly
+        sendCatalogMessage(waId);
+      } else {
+        // For all other text messages, send welcome + catalog
+        sendWelcomeMessage(waId, profileName);
+
+        // Send catalog after a short delay
+        setTimeout(() => {
+          sendCatalogMessage(waId);
+        }, 2000);
       }
-    }, 2000);
+    } else if (messageType === 'interactive') {
+      logger.info(`Interactive message from ${profileName} (${waId}):`, {
+        interactiveType: message.interactive.type,
+        messageId: message.id,
+        timestamp: message.timestamp
+      });
 
-  } else if (messageType === 'image' || messageType === 'video' || messageType === 'document') {
-    // Handle media messages
-    logger.info(`Media message (${messageType}) received from ${profileName} (${waId}):`, {
-      mediaId: message[messageType].id,
-      mimeType: message[messageType].mime_type || 'unknown'
-    });
+      // For interactive messages, send catalog after handling the specific type
 
-    // Send a friendly response
-    const response = `Thanks for the ${messageType}! If you'd like to place an order, please check our menu.`;
-    await sendWhatsAppMessage(waId, response);
-
-    // Send catalog after a short delay
-    setTimeout(async () => {
-      try {
-        await sendCatalogMessage(waId);
-      } catch (error) {
-        logger.error(`Error sending catalog after ${messageType} message:`, error.message);
+      if (message.interactive.type === 'button_reply') {
+        // Handle button replies
+        const buttonId = message.interactive.button_reply.id;
+        const buttonText = message.interactive.button_reply.title;
+        logger.info(`Button reply from ${waId}:`, { buttonId, buttonText });
+      } else if (message.interactive.type === 'list_reply') {
+        // Handle list selections
+        const listId = message.interactive.list_reply.id;
+        const listTitle = message.interactive.list_reply.title;
+        logger.info(`List selection from ${waId}:`, { listId, listTitle });
       }
-    }, 2000);
+
+      // For all interactive messages, send catalog after a short delay
+      setTimeout(() => {
+        sendCatalogMessage(waId);
+      }, 1500);
+
+    } else if (messageType === 'location') {
+      // Process location messages
+      logger.info(`Location received from ${profileName} (${waId}):`, {
+        latitude: message.location.latitude,
+        longitude: message.location.longitude,
+        name: message.location.name || 'Unknown location',
+        address: message.location.address || 'No address provided'
+      });
+
+      // Send a response acknowledging receipt of location
+      const response = `Thank you for sharing your location!\n\nWould you like to see our menu and place an order?`;
+      await sendWhatsAppMessage(waId, response);
+
+      // Send catalog after a short delay
+      setTimeout(() => {
+        sendCatalogMessage(waId);
+      }, 2000);
+    } else if (messageType === 'image' || messageType === 'video' || messageType === 'document') {
+      // Handle media messages
+      logger.info(`Media message (${messageType}) received from ${profileName} (${waId}):`, {
+        mediaId: message[messageType].id,
+        mimeType: message[messageType].mime_type || 'unknown'
+      });
+
+      // Send a friendly response
+      const response = `Thanks for the ${messageType}! If you'd like to place an order, please check our menu.`;
+      await sendWhatsAppMessage(waId, response);
+
+      // Send catalog after a short delay
+      setTimeout(() => {
+        sendCatalogMessage(waId);
+      }, 2000);
+    } else {
+      // Handle any other message type
+      logger.info(`Unspecified message type (${messageType}) from ${profileName} (${waId})`);
+
+      // For unrecognized message types, send a general response
+      const response = `Thanks for your message! Would you like to see our menu and place an order?`;
+      await sendWhatsAppMessage(waId, response);
+
+      // Send catalog after a short delay
+      setTimeout(() => {
+        sendCatalogMessage(waId);
+      }, 2000);
+    }
   }
 }
 
@@ -1002,10 +1024,48 @@ async function sendOrderConfirmation(order, waId, orderResult = null, orderRefer
   }
 }
 
-// Send WhatsApp Message Helper
+/**
+ * Send WhatsApp Message Helper
+ *
+ * Sends a message to a WhatsApp user with support for different message types:
+ * - Text messages (default)
+ * - Template messages (pre-approved templates)
+ * - Interactive messages (buttons, lists, etc.)
+ *
+ * The function handles errors gracefully and logs information about the message
+ * sending process. It also saves outbound messages to Firestore for tracking.
+ *
+ * @param {string} to - The WhatsApp phone number to send the message to
+ * @param {string} message - The message text (for text messages)
+ * @param {object} options - Additional options for the message
+ * @param {string} [options.type] - Message type: 'text', 'template', or 'interactive'
+ * @param {object} [options.template] - Template configuration for template messages
+ * @param {object} [options.interactive] - Interactive message configuration
+ * @param {boolean} [options.preview_url] - Whether to generate URL previews in text messages
+ * @param {string} [options.context_message_id] - Message ID to reply to
+ * @returns {Promise<object>} - The WhatsApp API response data
+ */
 async function sendWhatsAppMessage(to, message, options = {}) {
   try {
-    logger.debug(`Sending WhatsApp message to ${to}`, { messageLength: message.length });
+    // Validate phone number format (should contain only digits)
+    if (!to || !to.match(/^\d+$/)) {
+      throw new Error(`Invalid phone number format: ${to}`);
+    }
+
+    // For text messages, validate message content
+    if (!options.type || options.type === 'text') {
+      if (!message || typeof message !== 'string') {
+        throw new Error('Message text is required for text messages');
+      }
+    }
+
+    logger.debug(`Sending WhatsApp message to ${to}`, {
+      messageType: options.type || 'text',
+      messageLength: message ? message.length : 0,
+      hasTemplate: !!options.template,
+      hasInteractive: !!options.interactive,
+      isReply: !!options.context_message_id
+    });
 
     // Prepare the message payload based on message type
     let messageData = {
@@ -1014,12 +1074,12 @@ async function sendWhatsAppMessage(to, message, options = {}) {
       to: to
     };
 
-    // Handle different message types (text, template, interactive, etc.)
-    if (options.type === 'template') {
+    // Handle different message types
+    if (options.type === 'template' && options.template) {
       // Template message
       messageData.type = 'template';
       messageData.template = options.template;
-    } else if (options.type === 'interactive') {
+    } else if (options.type === 'interactive' && options.interactive) {
       // Interactive message
       messageData.type = 'interactive';
       messageData.interactive = options.interactive;
@@ -1028,7 +1088,7 @@ async function sendWhatsAppMessage(to, message, options = {}) {
       messageData.type = 'text';
       messageData.text = {
         body: message,
-        preview_url: options.preview_url || false
+        preview_url: options.preview_url === true
       };
     }
 
@@ -1039,6 +1099,7 @@ async function sendWhatsAppMessage(to, message, options = {}) {
       };
     }
 
+    // Make the API request with timeout and retry options
     const response = await axios({
       method: 'POST',
       url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
@@ -1046,19 +1107,34 @@ async function sendWhatsAppMessage(to, message, options = {}) {
         'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
-      data: messageData
+      data: messageData,
+      timeout: 10000, // 10 second timeout
+      validateStatus: status => status >= 200 && status < 300 // Only accept success status codes
     });
+
+    // Extract message ID for better tracking
+    const messageId = response.data.messages?.[0]?.id;
 
     // Save sent message to Firestore if Firebase is initialized
     if (db) {
       try {
+        // Calculate a display text for non-text messages
+        let displayText = '';
+        if (messageData.type === 'text') {
+          displayText = message;
+        } else if (messageData.type === 'template') {
+          displayText = `[Template: ${options.template?.name || 'unknown'}]`;
+        } else if (messageData.type === 'interactive') {
+          displayText = `[Interactive: ${options.interactive?.type || 'unknown'}]`;
+        }
+
         const sentMessageData = {
           from: process.env.WHATSAPP_PHONE_NUMBER_ID || 'bot',
           to: to,
           timestamp: admin.firestore.Timestamp.now(),
-          messageId: response.data.messages?.[0]?.id,
+          messageId: messageId,
           type: messageData.type,
-          text: messageData.type === 'text' ? message : '',
+          text: displayText,
           rawData: {
             ...messageData,
             response: response.data
@@ -1068,118 +1144,266 @@ async function sendWhatsAppMessage(to, message, options = {}) {
         };
 
         await db.collection('messages').add(sentMessageData);
-        logger.debug('Sent message saved to Firestore');
+        logger.debug('Sent message saved to Firestore', { messageId });
       } catch (firestoreErr) {
-        logger.error('Error saving sent message to Firestore:', firestoreErr);
+        // Log but don't fail the overall function if Firestore save fails
+        logger.error('Error saving sent message to Firestore:', firestoreErr.message);
       }
     }
 
     logger.info('Message sent successfully', {
       recipient: to,
-      messageId: response.data.messages?.[0]?.id
+      messageId: messageId,
+      messageType: messageData.type
     });
+
     return response.data;
   } catch (error) {
-    logger.error('Error sending WhatsApp message:', error.response?.data || error.message);
+    // Enhanced error logging with more details about the attempted message
+    const errorDetails = {
+      recipient: to,
+      messageType: options.type || 'text',
+      errorCode: error.response?.status,
+      errorMessage: error.response?.data?.error?.message || error.message,
+      apiError: error.response?.data?.error
+    };
+
+    logger.error('Error sending WhatsApp message:', errorDetails);
+
+    // For API errors, log the full response data for debugging
+    if (error.response?.data) {
+      logger.debug('WhatsApp API error details:', error.response.data);
+    }
+
     throw error;
   }
 }
 
-// Send Catalog Message Helper
+/**
+ * Send Catalog Message Helper
+ *
+ * Sends the product catalog to the specified WhatsApp number using a multi-level
+ * fallback approach to maximize delivery success rate. The function tries multiple
+ * methods in sequence until one succeeds:
+ *
+ * 1. Interactive button with catalog action
+ * 2. Template-based catalog message
+ * 3. Interactive catalog message
+ * 4. Direct link to catalog URL
+ * 5. Simple text message as final fallback
+ *
+ * @param {string} to - The WhatsApp phone number to send the catalog to
+ * @returns {Promise<object>} - The API response data from the successful method
+ */
 async function sendCatalogMessage(to) {
   try {
     logger.debug(`Sending catalog message to ${to}`);
 
-    // First, try using the template-based catalog message for better compatibility
+    // Initialize tracking for attempted methods
+    const attemptedMethods = [];
+
+    // Get catalog ID and thumbnail ID from environment or use defaults
+    const catalogId = process.env.WHATSAPP_CATALOG_ID || '649587371247572';
+    const thumbnailId = process.env.CATALOG_THUMBNAIL_ID || 'A001044';
+
+    // Common API request configuration
+    const apiConfig = {
+      method: 'POST',
+      url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      headers: {
+        'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    };
+
+    // Method 1: Interactive button approach
+    attemptedMethods.push('interactive_button');
     try {
       const response = await axios({
-        method: 'POST',
-        url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-        headers: {
-          'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        data: {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: to,
-          type: 'template',
-          template: {
-            name: 'catalog_display',
-            language: {
-              code: 'en_US'
-            },
-            components: [
-              {
-                type: 'body',
-                parameters: [
-                  {
-                    type: 'text',
-                    text: 'our delicious menu'
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      });
-
-      logger.info('Template catalog message sent successfully', {
-        recipient: to,
-        messageId: response.data.messages?.[0]?.id
-      });
-      return response.data;
-
-    } catch (templateError) {
-      // If template approach fails, fallback to interactive catalog message
-      logger.warn('Template catalog message failed, trying interactive approach:',
-        templateError.response?.data?.error?.message || templateError.message);
-
-      const response = await axios({
-        method: 'POST',
-        url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-        headers: {
-          'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
+        ...apiConfig,
         data: {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
           to: to,
           type: 'interactive',
           interactive: {
-            type: 'catalog_message',
+            type: 'button',
             body: {
-              text: '🍽️ Browse our menu and place your order!'
+              text: '🍽️ Check out our delicious menu! Tap the button below to browse and place your order.'
             },
             action: {
-              name: 'catalog_message',
-              parameters: {
-                thumbnail_product_retailer_id: process.env.CATALOG_THUMBNAIL_ID || 'A001032',
-                catalog_id: process.env.WHATSAPP_CATALOG_ID || '649587371247572'
-              }
-            },
-            footer: {
-              text: 'Tap to browse our delicious menu'
+              buttons: [
+                {
+                  type: 'catalog',
+                  name: 'catalog_button',
+                  catalog_id: catalogId,
+                  thumbnail_product_retailer_id: thumbnailId
+                }
+              ]
             }
           }
         }
       });
 
-      logger.info('Interactive catalog message sent successfully', {
+      logger.info('Interactive catalog button sent successfully', {
         recipient: to,
         messageId: response.data.messages?.[0]?.id
       });
       return response.data;
+
+    } catch (buttonError) {
+      // Log the error but continue to next approach
+      logger.warn(`Method ${attemptedMethods[0]} failed:`,
+        buttonError.response?.data?.error?.message || buttonError.message);
+
+      // Method 2: Template-based approach
+      attemptedMethods.push('template');
+      try {
+        const response = await axios({
+          ...apiConfig,
+          data: {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: to,
+            type: 'template',
+            template: {
+              name: 'catalog_display',
+              language: {
+                code: 'en_US'
+              },
+              components: [
+                {
+                  type: 'body',
+                  parameters: [
+                    {
+                      type: 'text',
+                      text: 'our delicious menu'
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        });
+
+        logger.info('Template catalog message sent successfully', {
+          recipient: to,
+          messageId: response.data.messages?.[0]?.id
+        });
+        return response.data;
+
+      } catch (templateError) {
+        // Log the error but continue to next approach
+        logger.warn(`Method ${attemptedMethods[1]} failed:`,
+          templateError.response?.data?.error?.message || templateError.message);
+
+        // Method 3: Interactive catalog message approach
+        attemptedMethods.push('catalog_message');
+        try {
+          const response = await axios({
+            ...apiConfig,
+            data: {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: to,
+              type: 'interactive',
+              interactive: {
+                type: 'catalog_message',
+                body: {
+                  text: '🍽️ Browse our menu and place your order!'
+                },
+                action: {
+                  name: 'catalog_message',
+                  parameters: {
+                    thumbnail_product_retailer_id: thumbnailId,
+                    catalog_id: catalogId
+                  }
+                },
+                footer: {
+                  text: 'Tap to browse our delicious menu'
+                }
+              }
+            }
+          });
+
+          logger.info('Interactive catalog message sent successfully', {
+            recipient: to,
+            messageId: response.data.messages?.[0]?.id
+          });
+          return response.data;
+
+        } catch (interactiveError) {
+          // Log the error but continue to next approach
+          logger.warn(`Method ${attemptedMethods[2]} failed:`,
+            interactiveError.response?.data?.error?.message || interactiveError.message);
+
+          // Method 4: Direct catalog URL approach
+          attemptedMethods.push('catalog_url');
+          try {
+            // Try direct catalog URL approach
+            const catalogUrl = `https://wa.me/c/${process.env.WHATSAPP_PHONE_NUMBER_ID.replace(/\D/g, '')}`;
+            const message = `🍽️ Check out our menu and place your order using this link: ${catalogUrl}`;
+
+            const response = await sendWhatsAppMessage(to, message, {
+              preview_url: true
+            });
+
+            logger.info('Catalog URL message sent successfully', {
+              recipient: to,
+              messageId: response.messages?.[0]?.id
+            });
+            return response;
+
+          } catch (urlError) {
+            // Log the error but continue to final fallback
+            logger.warn(`Method ${attemptedMethods[3]} failed:`,
+              urlError.message);
+
+            // Method 5: Simple text fallback (last resort)
+            attemptedMethods.push('simple_text');
+            const fallbackMessage = 'Thank you for your message! You can browse our menu and place your order through WhatsApp. Just tap on the shopping icon in our chat.';
+
+            const response = await sendWhatsAppMessage(to, fallbackMessage);
+            logger.info('Simple fallback message sent successfully', {
+              recipient: to,
+              messageId: response.messages?.[0]?.id
+            });
+            return response;
+          }
+        }
+      }
     }
   } catch (error) {
-    logger.error('Error sending catalog message:', error.response?.data || error.message);
-    // If all catalog approaches fail, send a simple text message instead
+    // This catch block handles any unexpected errors in the main function flow
+    logger.error('Critical error sending catalog (all methods failed):', error.message);
+
+    // Create a simple fallback that doesn't rely on previous code
     try {
-      await sendWhatsAppMessage(to, 'Thank you for your message! You can browse our menu and place your order through WhatsApp. Just tap on the "Catalog" button in our chat.');
-    } catch (fallbackError) {
-      logger.error('Error sending fallback message:', fallbackError.message);
+      // Absolute last resort fallback message
+      const emergencyMessage = 'Thank you for your interest! Please contact us to place your order.';
+      await axios({
+        method: 'POST',
+        url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        data: {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: to,
+          type: 'text',
+          text: {
+            body: emergencyMessage
+          }
+        }
+      });
+      logger.info('Emergency fallback message sent');
+    } catch (emergencyError) {
+      logger.error('Emergency fallback message also failed:', emergencyError.message);
     }
+
+    // For tracking purposes, we'll still throw the original error
     throw error;
   }
 }
@@ -1255,16 +1479,26 @@ async function sendWelcomeMessage(to, customerName = '') {
 }
 
 // Event log viewer endpoint - for debugging use only in non-production environments
-app.get('/events', (req, res) => {
+app.get('/events', async (req, res) => {
   if (process.env.NODE_ENV === 'production') {
     return res.status(403).json({ error: 'Forbidden in production environment' });
   }
-  
-  const eventId = req.query.id;
-  const limit = parseInt(req.query.limit || '50', 10);
-  
-  const events = eventLogger.readEvents(eventId, limit);
-  res.json(events);
+
+  try {
+    const eventId = req.query.id;
+    const limit = parseInt(req.query.limit || '50', 10);
+
+    // Read events (now an async function that supports Firebase)
+    const events = await eventLogger.readEvents(eventId, limit);
+    res.json(events);
+  } catch (error) {
+    logger.error('Error fetching events:', error);
+    res.status(500).json({
+      error: 'Error fetching events',
+      message: error.message,
+      source: error.source || 'unknown'
+    });
+  }
 });
 
 // Health check endpoint
@@ -1606,10 +1840,59 @@ process.on('unhandledRejection', (reason, promise) => {
   }
 });
 
+// Function to clean up old data files
+async function cleanupOldDataFiles() {
+  try {
+    logger.info('Running data cleanup routine...');
+
+    // Get retention period (default 12 hours)
+    const retentionHours = parseInt(process.env.DATA_RETENTION_HOURS || '12', 10);
+    const retentionMs = retentionHours * 60 * 60 * 1000;
+    const now = Date.now();
+    let deletedCount = 0;
+
+    // Check if the data directory exists
+    if (fs.existsSync(dataDir)) {
+      const files = fs.readdirSync(dataDir);
+
+      // Process each file
+      files.forEach(file => {
+        // Skip special files and directories
+        if (file === '.gitkeep' || file === 'firebase-service-account.json' || !file.includes('.json')) {
+          return;
+        }
+
+        const filePath = path.join(dataDir, file);
+        const stats = fs.statSync(filePath);
+
+        // Only delete if it's a file and older than retention period
+        if (stats.isFile() && (now - stats.mtime.getTime() > retentionMs)) {
+          try {
+            fs.unlinkSync(filePath);
+            deletedCount++;
+          } catch (delError) {
+            logger.error(`Error deleting old file ${file}:`, delError);
+          }
+        }
+      });
+    }
+
+    if (deletedCount > 0) {
+      logger.info(`Cleaned up ${deletedCount} old data files`);
+    }
+
+    // Schedule next cleanup (every 6 hours)
+    setTimeout(cleanupOldDataFiles, 6 * 60 * 60 * 1000);
+  } catch (error) {
+    logger.error('Error during data cleanup:', error);
+  }
+}
+
 // Start server
 app.listen(PORT, async () => {
   logger.info(`WhatsApp Webhook server running on port ${PORT}`);
   logger.info(`Full event logging is ${eventLogger.isEventLoggingEnabled() ? 'enabled' : 'disabled'}`);
+  logger.info(`Data retention period is set to ${process.env.DATA_RETENTION_HOURS || '12'} hours`);
 
   // Ensure the catalog file is available locally
   await productMapper.ensureLocalCatalogFile();
@@ -1621,4 +1904,7 @@ app.listen(PORT, async () => {
   } catch (error) {
     logger.warn(`Failed to load product catalog: ${error.message}`);
   }
+
+  // Run initial data cleanup
+  cleanupOldDataFiles();
 });
