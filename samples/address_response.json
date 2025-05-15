@@ -22,12 +22,21 @@
             "messages": [
               {
                 "from": "919886781317",
-                "id": "wamid.abcdefghijklmnopqrstuvwxyz",
+                "id": "wamid.abcdefghijklmnopqrstuvdef",
                 "timestamp": 1747341246,
-                "text": {
-                  "body": "Hello, I would like to order some food!"
-                },
-                "type": "text"
+                "type": "address",
+                "address": {
+                  "name": "John Doe",
+                  "phone": "919886781317",
+                  "street": "123 Main Street",
+                  "building": "Apartment Complex",
+                  "apartment": "Unit 45",
+                  "city": "Bangalore",
+                  "state": "Karnataka",
+                  "zip": "560001",
+                  "country": "India",
+                  "landmark": "Near Central Park"
+                }
               }
             ]
           },

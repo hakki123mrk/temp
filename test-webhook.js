@@ -42,6 +42,79 @@ const samples = {
     }]
   },
 
+  address_request: {
+    object: 'whatsapp_business_account',
+    entry: [{
+      id: '123456789',
+      changes: [{
+        value: {
+          messaging_product: 'whatsapp',
+          metadata: {
+            display_phone_number: '15551234567',
+            phone_number_id: '123456789'
+          },
+          contacts: [{
+            profile: {
+              name: 'Test User'
+            },
+            wa_id: '919886781317'
+          }],
+          messages: [{
+            from: '919886781317',
+            id: 'wamid.abcdefghijklmnopqrstuvabc',
+            timestamp: Math.floor(Date.now() / 1000),
+            text: {
+              body: 'I need to update my delivery address'
+            },
+            type: 'text'
+          }]
+        },
+        field: 'messages'
+      }]
+    }]
+  },
+
+  address_response: {
+    object: 'whatsapp_business_account',
+    entry: [{
+      id: '123456789',
+      changes: [{
+        value: {
+          messaging_product: 'whatsapp',
+          metadata: {
+            display_phone_number: '15551234567',
+            phone_number_id: '123456789'
+          },
+          contacts: [{
+            profile: {
+              name: 'Test User'
+            },
+            wa_id: '919886781317'
+          }],
+          messages: [{
+            from: '919886781317',
+            id: 'wamid.abcdefghijklmnopqrstuvdef',
+            timestamp: Math.floor(Date.now() / 1000),
+            type: 'address',
+            address: {
+              name: 'John Doe',
+              phone: '919886781317',
+              street: '123 Main Street',
+              building: 'Apartment Complex',
+              apartment: 'Unit 45',
+              city: 'Bangalore',
+              state: 'Karnataka',
+              zip: '560001',
+              country: 'India',
+              landmark: 'Near Central Park'
+            }
+          }]
+        },
+        field: 'messages'
+      }]
+    }]
+  },
+
   catalog_interaction: {
     object: 'whatsapp_business_account',
     entry: [{

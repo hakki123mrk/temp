@@ -22,10 +22,10 @@
             "messages": [
               {
                 "from": "919886781317",
-                "id": "wamid.abcdefghijklmnopqrstuvwxyz",
+                "id": "wamid.abcdefghijklmnopqrstuvabc",
                 "timestamp": 1747341246,
                 "text": {
-                  "body": "Hello, I would like to order some food!"
+                  "body": "I need to update my delivery address"
                 },
                 "type": "text"
               }

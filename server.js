@@ -421,6 +421,19 @@ async function processMessage(message, waId, profileName = 'Unknown') {
           messageText.includes('products')) {
         // For menu or ordering keywords, send catalog message directly
         sendCatalogMessage(waId);
+      } else if (messageText.includes('address') ||
+                messageText.includes('delivery') ||
+                messageText.includes('location') ||
+                messageText.includes('where') ||
+                messageText.includes('shipping')) {
+        // For address-related keywords, send address request
+        try {
+          await sendAddressRequestMessage(waId);
+        } catch (error) {
+          logger.error(`Error sending address request to ${waId}:`, error);
+          // Fall back to welcome message if address request fails
+          sendWelcomeMessage(waId, profileName);
+        }
       } else {
         // For all other text messages, send welcome + catalog
         sendWelcomeMessage(waId, profileName);
@@ -437,24 +450,184 @@ async function processMessage(message, waId, profileName = 'Unknown') {
         timestamp: message.timestamp
       });
 
-      // For interactive messages, send catalog after handling the specific type
-
+      // Handle different interactive types
       if (message.interactive.type === 'button_reply') {
         // Handle button replies
         const buttonId = message.interactive.button_reply.id;
         const buttonText = message.interactive.button_reply.title;
         logger.info(`Button reply from ${waId}:`, { buttonId, buttonText });
-      } else if (message.interactive.type === 'list_reply') {
+
+        // For all button replies, send catalog after a short delay
+        setTimeout(() => {
+          sendCatalogMessage(waId);
+        }, 1500);
+      }
+      else if (message.interactive.type === 'list_reply') {
         // Handle list selections
         const listId = message.interactive.list_reply.id;
         const listTitle = message.interactive.list_reply.title;
         logger.info(`List selection from ${waId}:`, { listId, listTitle });
-      }
 
-      // For all interactive messages, send catalog after a short delay
-      setTimeout(() => {
-        sendCatalogMessage(waId);
-      }, 1500);
+        // For all list replies, send catalog after a short delay
+        setTimeout(() => {
+          sendCatalogMessage(waId);
+        }, 1500);
+      }
+      else if (message.interactive.type === 'nfm_reply') {
+        // Handle flow responses (like address collection)
+        logger.info(`Flow response from ${profileName} (${waId}):`, {
+          flowName: message.interactive.nfm_reply.name,
+          bodyText: message.interactive.nfm_reply.body,
+          messageId: message.id
+        });
+
+        // Process flow response
+        if (message.interactive.nfm_reply.name === 'flow' &&
+            message.interactive.nfm_reply.response_json) {
+          try {
+            // Parse response JSON if it's a string
+            const responseJson = typeof message.interactive.nfm_reply.response_json === 'string'
+              ? JSON.parse(message.interactive.nfm_reply.response_json)
+              : message.interactive.nfm_reply.response_json;
+
+            logger.debug(`Flow response JSON:`, responseJson);
+
+            // Check if this is an address flow response
+            if (responseJson.screen_0_Address_0) {
+              const addressText = responseJson.screen_0_Address_0;
+              logger.info(`Received address from flow: ${addressText}`);
+
+              // Store address in Firestore
+              if (db) {
+                try {
+                  // Create address data object
+                  const addressData = {
+                    flowResponse: responseJson,
+                    addressText: addressText,
+                    updatedAt: admin.firestore.Timestamp.now()
+                  };
+
+                  // Update the contact with address information
+                  await db.collection('contacts').doc(waId).set({
+                    address: addressData,
+                    addressUpdatedAt: admin.firestore.Timestamp.now()
+                  }, { merge: true });
+
+                  logger.info(`Flow address for ${waId} saved to Firestore`);
+
+                  // Check for any pending orders for this customer
+                  const pendingOrdersSnapshot = await db.collection('pendingOrders')
+                    .where('waId', '==', waId)
+                    .where('status', '==', 'awaiting_address')
+                    .get();
+
+                  if (!pendingOrdersSnapshot.empty) {
+                    // We have pending orders to process
+                    let pendingOrdersCount = pendingOrdersSnapshot.size;
+                    logger.info(`Found ${pendingOrdersCount} pending orders for ${waId} after flow address collection`);
+
+                    // Send a message that we're processing their pending order(s)
+                    await sendWhatsAppMessage(
+                      waId,
+                      `Thank you for providing your delivery address! We're now processing your pending order${pendingOrdersCount > 1 ? 's' : ''}.`
+                    );
+
+                    // Process each pending order
+                    for (const doc of pendingOrdersSnapshot.docs) {
+                      const pendingOrder = doc.data();
+                      const orderReference = doc.id;
+
+                      try {
+                        logger.info(`Processing pending order ${orderReference} after flow address collection`);
+
+                        // Update the order status
+                        await db.collection('pendingOrders').doc(orderReference).update({
+                          status: 'processing',
+                          addressData: addressData,
+                          processingStartedAt: admin.firestore.Timestamp.now()
+                        });
+
+                        // Process the order with the new address
+                        const orderResult = await iposService.processOrderToiPOS(
+                          pendingOrder.orderData,
+                          waId,
+                          orderReference,
+                          pendingOrder.profileName,
+                          addressData
+                        );
+
+                        // Send order confirmation
+                        sendOrderConfirmation(
+                          pendingOrder.orderData,
+                          waId,
+                          orderResult,
+                          orderReference,
+                          pendingOrder.profileName
+                        );
+
+                        // Update order status to completed
+                        await db.collection('pendingOrders').doc(orderReference).update({
+                          status: 'completed',
+                          processingCompletedAt: admin.firestore.Timestamp.now(),
+                          orderResult: orderResult
+                        });
+                      } catch (error) {
+                        logger.error(`Error processing pending order ${orderReference} after flow address collection:`, error);
+
+                        // Update order status to failed
+                        await db.collection('pendingOrders').doc(orderReference).update({
+                          status: 'failed',
+                          error: error.message,
+                          processingFailedAt: admin.firestore.Timestamp.now()
+                        });
+
+                        // Send basic confirmation even if processing failed
+                        sendOrderConfirmation(
+                          pendingOrder.orderData,
+                          waId,
+                          { success: false, error: error.message },
+                          orderReference,
+                          pendingOrder.profileName
+                        );
+                      }
+                    }
+
+                    return; // Skip further processing
+                  } else {
+                    // No pending orders, send a thank you message
+                    await sendWhatsAppMessage(
+                      waId,
+                      `Thank you for providing your delivery address! We've saved it for your current and future orders. Would you like to place an order now?`
+                    );
+
+                    // Send catalog after a short delay
+                    setTimeout(() => {
+                      sendCatalogMessage(waId);
+                    }, 2000);
+
+                    return; // Skip further processing
+                  }
+                } catch (error) {
+                  logger.error(`Error processing flow address from ${waId}:`, error);
+                }
+              }
+            }
+          } catch (error) {
+            logger.error(`Error parsing flow response from ${waId}:`, error);
+          }
+        }
+
+        // For unhandled flow replies, send catalog after a short delay
+        setTimeout(() => {
+          sendCatalogMessage(waId);
+        }, 1500);
+      }
+      else {
+        // For all other interactive types, send catalog after a short delay
+        setTimeout(() => {
+          sendCatalogMessage(waId);
+        }, 1500);
+      }
 
     } else if (messageType === 'location') {
       // Process location messages
@@ -468,6 +641,136 @@ async function processMessage(message, waId, profileName = 'Unknown') {
       // Send a response acknowledging receipt of location
       const response = `Thank you for sharing your location!\n\nWould you like to see our menu and place an order?`;
       await sendWhatsAppMessage(waId, response);
+
+      // Send catalog after a short delay
+      setTimeout(() => {
+        sendCatalogMessage(waId);
+      }, 2000);
+    } else if (messageType === 'address') {
+      // Handle address messages (responses to address requests)
+      logger.info(`Address received from ${profileName} (${waId}):`, {
+        messageId: message.id,
+        timestamp: message.timestamp
+      });
+
+      // Extract address details
+      const addressData = message.address || {};
+
+      // Log the address information
+      logger.info(`Address details from ${waId}:`, {
+        name: addressData.name || 'Not provided',
+        phone: addressData.phone || 'Not provided',
+        street: [
+          addressData.street || '',
+          addressData.building || '',
+          addressData.apartment || ''
+        ].filter(Boolean).join(' '),
+        city: addressData.city || 'Not provided',
+        state: addressData.state || 'Not provided',
+        zip: addressData.zip || 'Not provided'
+      });
+
+      // Store address in Firestore for future use
+      if (db) {
+        try {
+          // Update the contact with address information
+          await db.collection('contacts').doc(waId).set({
+            address: addressData,
+            addressUpdatedAt: admin.firestore.Timestamp.now()
+          }, { merge: true });
+
+          logger.info(`Address for ${waId} saved to Firestore`);
+
+          // Check for any pending orders for this customer
+          const pendingOrdersSnapshot = await db.collection('pendingOrders')
+            .where('waId', '==', waId)
+            .where('status', '==', 'awaiting_address')
+            .get();
+
+          if (!pendingOrdersSnapshot.empty) {
+            // We have pending orders to process
+            let pendingOrdersCount = pendingOrdersSnapshot.size;
+            logger.info(`Found ${pendingOrdersCount} pending orders for ${waId} after address collection`);
+
+            // Send a message that we're processing their pending order(s)
+            await sendWhatsAppMessage(
+              waId,
+              `Thank you for providing your delivery address! We're now processing your pending order${pendingOrdersCount > 1 ? 's' : ''}.`
+            );
+
+            // Process each pending order
+            for (const doc of pendingOrdersSnapshot.docs) {
+              const pendingOrder = doc.data();
+              const orderReference = doc.id;
+
+              try {
+                logger.info(`Processing pending order ${orderReference} after address collection`);
+
+                // Update the order status
+                await db.collection('pendingOrders').doc(orderReference).update({
+                  status: 'processing',
+                  addressData: addressData,
+                  processingStartedAt: admin.firestore.Timestamp.now()
+                });
+
+                // Process the order with the new address
+                const orderResult = await iposService.processOrderToiPOS(
+                  pendingOrder.orderData,
+                  waId,
+                  orderReference,
+                  pendingOrder.profileName,
+                  addressData
+                );
+
+                // Send order confirmation
+                sendOrderConfirmation(
+                  pendingOrder.orderData,
+                  waId,
+                  orderResult,
+                  orderReference,
+                  pendingOrder.profileName
+                );
+
+                // Update order status to completed
+                await db.collection('pendingOrders').doc(orderReference).update({
+                  status: 'completed',
+                  processingCompletedAt: admin.firestore.Timestamp.now(),
+                  orderResult: orderResult
+                });
+
+              } catch (error) {
+                logger.error(`Error processing pending order ${orderReference} after address collection:`, error);
+
+                // Update order status to failed
+                await db.collection('pendingOrders').doc(orderReference).update({
+                  status: 'failed',
+                  error: error.message,
+                  processingFailedAt: admin.firestore.Timestamp.now()
+                });
+
+                // Send basic confirmation even if processing failed
+                sendOrderConfirmation(
+                  pendingOrder.orderData,
+                  waId,
+                  { success: false, error: error.message },
+                  orderReference,
+                  pendingOrder.profileName
+                );
+              }
+            }
+
+            return; // Skip the thank you message and catalog below since we processed orders
+          }
+        } catch (error) {
+          logger.error(`Error saving address or processing pending orders for ${waId}:`, error);
+        }
+      }
+
+      // Only send this thank you if no pending orders were processed
+      await sendWhatsAppMessage(
+        waId,
+        `Thank you for providing your delivery address! We've saved it for your current and future orders. Would you like to place an order now?`
+      );
 
       // Send catalog after a short delay
       setTimeout(() => {
@@ -527,8 +830,60 @@ async function processShoppingEvent(shopping, waId, metadata, profileName = 'Unk
     const orderReference = logger.logOrder(order, waId);
 
     try {
-      // Process the order and get the result - pass the order reference and profile name for tracking
-      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference, profileName);
+      // Check if we already have an address for this customer
+      let hasAddress = false;
+      let addressData = null;
+
+      if (db) {
+        // Query Firestore for customer address
+        const contactDoc = await db.collection('contacts').doc(waId).get();
+        if (contactDoc.exists) {
+          const contactData = contactDoc.data();
+          if (contactData.address && Object.keys(contactData.address).length > 0) {
+            hasAddress = true;
+            addressData = contactData.address;
+            logger.info(`Found existing address for ${waId}`);
+          }
+        }
+      }
+
+      if (!hasAddress) {
+        // We don't have an address - need to request it before processing order
+        logger.info(`No address found for ${waId}, requesting address before processing order ${orderReference}`);
+
+        // Store pending order in Firestore
+        if (db) {
+          await db.collection('pendingOrders').doc(orderReference).set({
+            waId: waId,
+            orderData: order,
+            profileName: profileName,
+            timestamp: admin.firestore.Timestamp.now(),
+            status: 'awaiting_address'
+          });
+          logger.info(`Stored pending order ${orderReference} waiting for address`);
+        }
+
+        // Send initial order acknowledgment
+        const acknowledgment = `Thank you for your order! To complete your purchase, we need your delivery address.`;
+        await sendWhatsAppMessage(waId, acknowledgment);
+
+        // Send address request flow with slight delay
+        setTimeout(async () => {
+          try {
+            await sendAddressRequestMessage(waId);
+          } catch (addressRequestError) {
+            logger.error(`Error sending address request for order ${orderReference}:`, addressRequestError);
+          }
+        }, 1500);
+
+        return; // Exit early - will process order when address is received
+      }
+
+      // We have the address, proceed with order processing
+      logger.info(`Processing order ${orderReference} with existing address`);
+
+      // Process the order and get the result - pass the order reference, profile name and address for tracking
+      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference, profileName, addressData);
 
       // Send order confirmation message with the result info
       sendOrderConfirmation(order, waId, orderResult, orderReference, profileName);
@@ -624,7 +979,7 @@ async function authenticateWithIPOS() {
 }
 
 // Format WhatsApp order for iPOS API
-function formatOrderForIPOS(order, waId, orderReference) {
+function formatOrderForIPOS(order, waId, orderReference, addressData = null) {
   // Calculate total amount including all items
   const totalAmount = order.product_items.reduce((total, item) => {
     return total + (item.price * item.quantity);
@@ -676,6 +1031,91 @@ function formatOrderForIPOS(order, waId, orderReference) {
     }
   ];
 
+  // Format address for iPOS
+  let formattedAddress = "";
+  let customerName = orderReference; // Default to order reference
+
+  // If we have address data, format it
+  if (addressData) {
+    // If it's the flow response format with interactive data
+    if (addressData.interactive && addressData.interactive.nfm_reply) {
+      try {
+        const flowReply = addressData.interactive.nfm_reply;
+        // If it's a string, parse it, otherwise use directly
+        const responseJson = typeof flowReply.response_json === 'string'
+          ? JSON.parse(flowReply.response_json)
+          : flowReply.response_json;
+
+        // Extract address from the flow response
+        if (responseJson && responseJson.screen_0_Address_0) {
+          formattedAddress = responseJson.screen_0_Address_0;
+          logger.info(`Using address from flow response: ${formattedAddress}`);
+        }
+      } catch (error) {
+        logger.error('Error parsing flow address response:', error);
+        formattedAddress = "Address parsing error";
+      }
+    }
+    // If it's already the parsed response JSON with screen_0_Address_0
+    else if (addressData.response_json || addressData.screen_0_Address_0) {
+      try {
+        if (addressData.response_json) {
+          // Try to parse if it's a string
+          const parsedJson = typeof addressData.response_json === 'string'
+            ? JSON.parse(addressData.response_json)
+            : addressData.response_json;
+
+          if (parsedJson.screen_0_Address_0) {
+            formattedAddress = parsedJson.screen_0_Address_0;
+          }
+        } else if (addressData.screen_0_Address_0) {
+          formattedAddress = addressData.screen_0_Address_0;
+        }
+
+        logger.info(`Using direct flow address value: ${formattedAddress}`);
+      } catch (error) {
+        logger.error('Error parsing direct flow address:', error);
+        formattedAddress = "Address parsing error";
+      }
+    }
+    // Standard address format from address message
+    else if (addressData.street || addressData.city) {
+      // Extract name if available
+      if (addressData.name) {
+        customerName = addressData.name;
+      }
+
+      // Format address
+      const addressComponents = [];
+
+      // Street, building, apartment
+      if (addressData.street) addressComponents.push(addressData.street);
+      if (addressData.building) addressComponents.push(addressData.building);
+      if (addressData.apartment) addressComponents.push(addressData.apartment);
+
+      // City, state, zip
+      if (addressData.city) addressComponents.push(addressData.city);
+      if (addressData.state) addressComponents.push(addressData.state);
+      if (addressData.zip) addressComponents.push(addressData.zip);
+
+      // Combine all valid address components
+      formattedAddress = addressComponents.filter(Boolean).join(", ");
+
+      // Add landmark if provided
+      if (addressData.landmark) {
+        formattedAddress += ` (Landmark: ${addressData.landmark})`;
+      }
+    }
+    // If it's a plain text address
+    else if (typeof addressData === 'string') {
+      formattedAddress = addressData;
+    }
+    // All other cases, use what we have
+    else {
+      formattedAddress = JSON.stringify(addressData).substring(0, 100); // Limit length
+    }
+  }
+
   // Create the full order object
   return {
     "InvNo": 0,
@@ -708,15 +1148,15 @@ function formatOrderForIPOS(order, waId, orderReference) {
     "GiftVoucherNo": "",
     "NationalityCode": 1,
     "TableNo": 1,
-    "TakeAway": 1,
+    "TakeAway": 0, // Changed to 0 when we have delivery address
     "Delivery": 1, // Mark as delivery order for WhatsApp
-    "Name": `${orderReference}`,
-    "Address": "",
+    "Name": customerName, // Use customer name if available
+    "Address": formattedAddress, // Use formatted address
     "PhoneNo": waId,
     "Merged": 0,
     "Split": 0,
     "CupType": 0,
-    "Company": "",
+    "Company": addressData && addressData.company ? addressData.company : "",
     "IdNo": "",
     "PAX": 1,
     "TableSubNo": 0,
@@ -1180,6 +1620,155 @@ async function sendWhatsAppMessage(to, message, options = {}) {
 }
 
 /**
+ * Send Address Request Message
+ *
+ * Sends an interactive message that requests the user's delivery address.
+ * Uses Flow-based approach as the primary method and falls back to text-based approach.
+ *
+ * @param {string} to - The WhatsApp phone number to send the address request to
+ * @returns {Promise<object>} - The API response data
+ */
+async function sendAddressRequestMessage(to) {
+  try {
+    logger.info(`Sending address request message to ${to}`);
+
+    // Flow ID provided for address collection
+    const FLOW_ID = '678077614823992';
+
+    const response = await axios({
+      method: 'POST',
+      url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      headers: {
+        'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      data: {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: to,
+        type: 'interactive',
+        interactive: {
+          type: 'flow',
+          header: {
+            type: 'text',
+            text: 'Delivery Address'
+          },
+          body: {
+            text: 'Please provide your delivery address so we can deliver your order.'
+          },
+          footer: {
+            text: 'Your address will be saved for future orders'
+          },
+          action: {
+            name: 'flow',
+            parameters: {
+              flow_message_version: '3',
+              flow_id: FLOW_ID,
+              flow_cta: 'Provide Address',
+              flow_action: 'navigate'
+            }
+          }
+        }
+      }
+    });
+
+    // Save sent message to Firestore
+    if (db) {
+      try {
+        const sentMessageData = {
+          from: process.env.WHATSAPP_PHONE_NUMBER_ID || 'bot',
+          to: to,
+          timestamp: admin.firestore.Timestamp.now(),
+          messageId: response.data.messages?.[0]?.id,
+          type: 'interactive',
+          text: '[Address Request - Flow]',
+          rawData: {
+            type: 'flow_address_request',
+            flowId: FLOW_ID,
+            response: response.data
+          },
+          direction: 'outbound',
+          status: 'sent'
+        };
+
+        await db.collection('messages').add(sentMessageData);
+        logger.debug('Flow address request message saved to Firestore');
+      } catch (firestoreErr) {
+        logger.error('Error saving flow address request to Firestore:', firestoreErr.message);
+      }
+    }
+
+    logger.info('Flow address request message sent successfully', {
+      recipient: to,
+      messageId: response.data.messages?.[0]?.id,
+      flowId: FLOW_ID
+    });
+
+    return response.data;
+  } catch (error) {
+    const errorDetails = {
+      recipient: to,
+      errorCode: error.response?.status,
+      errorMessage: error.response?.data?.error?.message || error.message
+    };
+
+    logger.error('Error sending flow address request message:', errorDetails);
+
+    // Try the address_message approach as first fallback (for backward compatibility)
+    try {
+      logger.info('Flow approach failed, trying address_message fallback');
+
+      const response = await axios({
+        method: 'POST',
+        url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        data: {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: to,
+          type: 'interactive',
+          interactive: {
+            type: 'address_message',
+            body: {
+              text: 'Please share your delivery address so we can deliver your order.'
+            },
+            action: {
+              name: 'address_message'
+            }
+          }
+        }
+      });
+
+      logger.info('Address message fallback sent successfully', {
+        recipient: to,
+        messageId: response.data.messages?.[0]?.id
+      });
+
+      return response.data;
+    } catch (addressError) {
+      // If both flow and address_message approaches fail, use text-based fallback
+      logger.info('Both flow and address_message approaches failed, using text fallback');
+
+      return await sendWhatsAppMessage(
+        to,
+        'Please share your delivery address in the following format:\n\n' +
+        'Full Name:\n' +
+        'Phone Number:\n' +
+        'Street Address & Building:\n' +
+        'Apartment/Floor/Unit:\n' +
+        'City:\n' +
+        'State/Province:\n' +
+        'PIN Code/ZIP:\n' +
+        'Landmark (optional):'
+      );
+    }
+  }
+}
+
+/**
  * Send Catalog Message Helper
  *
  * Sends the product catalog to the specified WhatsApp number using a multi-level
@@ -1522,6 +2111,72 @@ app.get('/api/health', (req, res) => {
     },
     timestamp: new Date().toISOString()
   });
+});
+
+// API endpoint to request address from a user
+app.post('/api/request-address', async (req, res) => {
+  try {
+    const { phoneNumber } = req.body;
+
+    if (!phoneNumber) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number is required'
+      });
+    }
+
+    // Validate phone number format (numbers only)
+    if (!phoneNumber.match(/^\d+$/)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number format. Only digits allowed.'
+      });
+    }
+
+    logger.info(`Sending address request to ${phoneNumber}`);
+
+    try {
+      // Send the address request message using the flow-based approach
+      const result = await sendAddressRequestMessage(phoneNumber);
+
+      // Log the request in Firestore if Firebase is initialized
+      if (db) {
+        try {
+          await db.collection('addressRequests').add({
+            phoneNumber: phoneNumber,
+            timestamp: admin.firestore.Timestamp.now(),
+            status: 'sent',
+            responseId: result?.messages?.[0]?.id || null
+          });
+
+          logger.debug(`Address request logged to Firestore for ${phoneNumber}`);
+        } catch (firestoreErr) {
+          logger.error(`Error logging address request to Firestore for ${phoneNumber}:`, firestoreErr);
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Address request sent successfully',
+        messageId: result?.messages?.[0]?.id || null
+      });
+    } catch (error) {
+      logger.error(`Error sending address request to ${phoneNumber}:`, error);
+
+      return res.status(500).json({
+        success: false,
+        error: `Failed to send address request: ${error.message}`,
+        details: error.response?.data || {}
+      });
+    }
+  } catch (error) {
+    logger.error('Error in request-address endpoint:', error);
+
+    return res.status(500).json({
+      success: false,
+      error: `Server error: ${error.message}`
+    });
+  }
 });
 
 // API endpoint for sending message replies

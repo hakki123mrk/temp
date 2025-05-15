@@ -1,0 +1,25 @@
+{
+  "id": "8eltdctsluky4bg8",
+  "timestamp": "2025-05-15T20:00:17.001Z",
+  "type": "message-text",
+  "meta": {
+    "receivedAt": "2025-05-15T20:00:17.001Z",
+    "environment": "production"
+  },
+  "headers": {
+    "accept": "application/json, text/plain, */*",
+    "content-type": "application/json",
+    "user-agent": "axios/1.9.0",
+    "content-length": "458",
+    "accept-encoding": "gzip, compress, deflate, br",
+    "host": "localhost:4000",
+    "connection": "keep-alive"
+  },
+  "message": {
+    "id": "wamid.abcdefghijklmnopqrstuvabc",
+    "type": "text",
+    "from": "919886781317",
+    "timestamp": 1747339216,
+    "text": "I need to update my delivery address"
+  }
+}
