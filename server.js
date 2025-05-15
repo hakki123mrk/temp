@@ -457,10 +457,115 @@ async function processMessage(message, waId, profileName = 'Unknown') {
         const buttonText = message.interactive.button_reply.title;
         logger.info(`Button reply from ${waId}:`, { buttonId, buttonText });
 
-        // For all button replies, send catalog after a short delay
-        setTimeout(() => {
-          sendCatalogMessage(waId);
-        }, 1500);
+        // Check if this is an address-related button reply
+        if (buttonId.startsWith('use_existing_address:')) {
+          // User wants to use their existing address
+          const orderReference = buttonId.split(':')[1];
+          logger.info(`User ${waId} chose to use existing address for order ${orderReference}`);
+
+          // Retrieve the pending order from Firestore
+          if (db) {
+            try {
+              const pendingOrderDoc = await db.collection('pendingOrders').doc(orderReference).get();
+
+              if (pendingOrderDoc.exists) {
+                const pendingOrder = pendingOrderDoc.data();
+
+                if (pendingOrder.status === 'awaiting_address_confirmation' && pendingOrder.existingAddress) {
+                  // Update order status
+                  await db.collection('pendingOrders').doc(orderReference).update({
+                    status: 'processing',
+                    processingStartedAt: admin.firestore.Timestamp.now(),
+                    addressData: pendingOrder.existingAddress,
+                    addressSelectionMethod: 'existing_confirmed'
+                  });
+
+                  // Send confirmation message
+                  await sendWhatsAppMessage(waId, `Great! We'll use your existing address for this order. Processing your order now...`);
+
+                  // Process the order with the existing address
+                  const orderResult = await iposService.processOrderToiPOS(
+                    pendingOrder.orderData,
+                    waId,
+                    orderReference,
+                    pendingOrder.profileName,
+                    pendingOrder.existingAddress
+                  );
+
+                  // Send order confirmation
+                  sendOrderConfirmation(
+                    pendingOrder.orderData,
+                    waId,
+                    orderResult,
+                    orderReference,
+                    pendingOrder.profileName
+                  );
+
+                  // Update order status to completed
+                  await db.collection('pendingOrders').doc(orderReference).update({
+                    status: 'completed',
+                    processingCompletedAt: admin.firestore.Timestamp.now(),
+                    orderResult: orderResult
+                  });
+
+                  return; // Skip further processing
+                }
+              } else {
+                logger.warn(`No pending order found with reference ${orderReference} for address confirmation`);
+              }
+            } catch (error) {
+              logger.error(`Error processing address confirmation for order ${orderReference}:`, error);
+            }
+          }
+        }
+        else if (buttonId.startsWith('add_new_address:')) {
+          // User wants to add a new address
+          const orderReference = buttonId.split(':')[1];
+          logger.info(`User ${waId} chose to add a new address for order ${orderReference}`);
+
+          // Retrieve the pending order from Firestore
+          if (db) {
+            try {
+              const pendingOrderDoc = await db.collection('pendingOrders').doc(orderReference).get();
+
+              if (pendingOrderDoc.exists) {
+                const pendingOrder = pendingOrderDoc.data();
+
+                if (pendingOrder.status === 'awaiting_address_confirmation') {
+                  // Update order status
+                  await db.collection('pendingOrders').doc(orderReference).update({
+                    status: 'awaiting_address',
+                    addressSelectionMethod: 'requested_new'
+                  });
+
+                  // Send confirmation message
+                  await sendWhatsAppMessage(waId, `No problem! Let's collect your new delivery address.`);
+
+                  // Send address request with slight delay
+                  setTimeout(async () => {
+                    try {
+                      await sendAddressRequestMessage(waId);
+                    } catch (addressRequestError) {
+                      logger.error(`Error sending address request for order ${orderReference}:`, addressRequestError);
+                    }
+                  }, 1000);
+
+                  return; // Skip further processing
+                }
+              } else {
+                logger.warn(`No pending order found with reference ${orderReference} for new address request`);
+              }
+            } catch (error) {
+              logger.error(`Error processing new address request for order ${orderReference}:`, error);
+            }
+          }
+        }
+        else {
+          // For all other button replies, send catalog after a short delay
+          setTimeout(() => {
+            sendCatalogMessage(waId);
+          }, 1500);
+        }
       }
       else if (message.interactive.type === 'list_reply') {
         // Handle list selections
@@ -507,6 +612,22 @@ async function processMessage(message, waId, profileName = 'Unknown') {
                     updatedAt: admin.firestore.Timestamp.now()
                   };
 
+                  // Check if we need to check for pending orders before saving the address
+                  let processPendingOrders = true;
+
+                  // First check for pending orders that specifically requested a new address
+                  const newAddressOrdersSnapshot = await db.collection('pendingOrders')
+                    .where('waId', '==', waId)
+                    .where('status', '==', 'awaiting_address')
+                    .where('addressSelectionMethod', '==', 'requested_new')
+                    .get();
+
+                  // If we have orders that specifically requested a new address
+                  if (!newAddressOrdersSnapshot.empty) {
+                    logger.info(`Found ${newAddressOrdersSnapshot.size} pending orders for ${waId} that requested a new address`);
+                    // We'll process these orders with the new address, but we still want to update the contact's default address
+                  }
+
                   // Update the contact with address information
                   await db.collection('contacts').doc(waId).set({
                     address: addressData,
@@ -515,16 +636,9 @@ async function processMessage(message, waId, profileName = 'Unknown') {
 
                   logger.info(`Flow address for ${waId} saved to Firestore`);
 
-                  // Check for any pending orders for this customer
-                  const pendingOrdersSnapshot = await db.collection('pendingOrders')
-                    .where('waId', '==', waId)
-                    .where('status', '==', 'awaiting_address')
-                    .get();
-
-                  if (!pendingOrdersSnapshot.empty) {
-                    // We have pending orders to process
-                    let pendingOrdersCount = pendingOrdersSnapshot.size;
-                    logger.info(`Found ${pendingOrdersCount} pending orders for ${waId} after flow address collection`);
+                  // Prioritize processing orders that specifically requested a new address
+                  if (!newAddressOrdersSnapshot.empty) {
+                    const pendingOrdersCount = newAddressOrdersSnapshot.size;
 
                     // Send a message that we're processing their pending order(s)
                     await sendWhatsAppMessage(
@@ -532,18 +646,19 @@ async function processMessage(message, waId, profileName = 'Unknown') {
                       `Thank you for providing your delivery address! We're now processing your pending order${pendingOrdersCount > 1 ? 's' : ''}.`
                     );
 
-                    // Process each pending order
-                    for (const doc of pendingOrdersSnapshot.docs) {
+                    // Process each pending order that requested a new address
+                    for (const doc of newAddressOrdersSnapshot.docs) {
                       const pendingOrder = doc.data();
                       const orderReference = doc.id;
 
                       try {
-                        logger.info(`Processing pending order ${orderReference} after flow address collection`);
+                        logger.info(`Processing pending order ${orderReference} with newly provided address`);
 
                         // Update the order status
                         await db.collection('pendingOrders').doc(orderReference).update({
                           status: 'processing',
                           addressData: addressData,
+                          addressReplacedWith: 'new_address',
                           processingStartedAt: admin.firestore.Timestamp.now()
                         });
 
@@ -572,7 +687,7 @@ async function processMessage(message, waId, profileName = 'Unknown') {
                           orderResult: orderResult
                         });
                       } catch (error) {
-                        logger.error(`Error processing pending order ${orderReference} after flow address collection:`, error);
+                        logger.error(`Error processing pending order ${orderReference} with new address:`, error);
 
                         // Update order status to failed
                         await db.collection('pendingOrders').doc(orderReference).update({
@@ -592,20 +707,110 @@ async function processMessage(message, waId, profileName = 'Unknown') {
                       }
                     }
 
-                    return; // Skip further processing
-                  } else {
-                    // No pending orders, send a thank you message
-                    await sendWhatsAppMessage(
-                      waId,
-                      `Thank you for providing your delivery address! We've saved it for your current and future orders. Would you like to place an order now?`
-                    );
+                    // We've processed the orders that specifically requested a new address
+                    // No need to process other pending orders
+                    processPendingOrders = false;
+                  }
 
-                    // Send catalog after a short delay
-                    setTimeout(() => {
-                      sendCatalogMessage(waId);
-                    }, 2000);
+                  // Check for any regular pending orders for this customer
+                  if (processPendingOrders) {
+                    const pendingOrdersSnapshot = await db.collection('pendingOrders')
+                      .where('waId', '==', waId)
+                      .where('status', '==', 'awaiting_address')
+                      .get();
 
-                    return; // Skip further processing
+                    if (!pendingOrdersSnapshot.empty) {
+                      // We have pending orders to process
+                      let pendingOrdersCount = pendingOrdersSnapshot.size;
+                      logger.info(`Found ${pendingOrdersCount} pending orders for ${waId} after flow address collection`);
+
+                      // Send a message that we're processing their pending order(s)
+                      await sendWhatsAppMessage(
+                        waId,
+                        `Thank you for providing your delivery address! We're now processing your pending order${pendingOrdersCount > 1 ? 's' : ''}.`
+                      );
+
+                      // Process each pending order
+                      for (const doc of pendingOrdersSnapshot.docs) {
+                        const pendingOrder = doc.data();
+
+                        // Skip orders that specifically requested a new address (already processed)
+                        if (pendingOrder.addressSelectionMethod === 'requested_new') {
+                          continue;
+                        }
+
+                        const orderReference = doc.id;
+
+                        try {
+                          logger.info(`Processing pending order ${orderReference} after flow address collection`);
+
+                          // Update the order status
+                          await db.collection('pendingOrders').doc(orderReference).update({
+                            status: 'processing',
+                            addressData: addressData,
+                            processingStartedAt: admin.firestore.Timestamp.now()
+                          });
+
+                          // Process the order with the new address
+                          const orderResult = await iposService.processOrderToiPOS(
+                            pendingOrder.orderData,
+                            waId,
+                            orderReference,
+                            pendingOrder.profileName,
+                            addressData
+                          );
+
+                          // Send order confirmation
+                          sendOrderConfirmation(
+                            pendingOrder.orderData,
+                            waId,
+                            orderResult,
+                            orderReference,
+                            pendingOrder.profileName
+                          );
+
+                          // Update order status to completed
+                          await db.collection('pendingOrders').doc(orderReference).update({
+                            status: 'completed',
+                            processingCompletedAt: admin.firestore.Timestamp.now(),
+                            orderResult: orderResult
+                          });
+                        } catch (error) {
+                          logger.error(`Error processing pending order ${orderReference} after flow address collection:`, error);
+
+                          // Update order status to failed
+                          await db.collection('pendingOrders').doc(orderReference).update({
+                            status: 'failed',
+                            error: error.message,
+                            processingFailedAt: admin.firestore.Timestamp.now()
+                          });
+
+                          // Send basic confirmation even if processing failed
+                          sendOrderConfirmation(
+                            pendingOrder.orderData,
+                            waId,
+                            { success: false, error: error.message },
+                            orderReference,
+                            pendingOrder.profileName
+                          );
+                        }
+                      }
+
+                      return; // Skip further processing
+                    } else {
+                      // No pending orders, send a thank you message
+                      await sendWhatsAppMessage(
+                        waId,
+                        `Thank you for providing your delivery address! We've saved it for your current and future orders. Would you like to place an order now?`
+                      );
+
+                      // Send catalog after a short delay
+                      setTimeout(() => {
+                        sendCatalogMessage(waId);
+                      }, 2000);
+
+                      return; // Skip further processing
+                    }
                   }
                 } catch (error) {
                   logger.error(`Error processing flow address from ${waId}:`, error);
@@ -673,6 +878,22 @@ async function processMessage(message, waId, profileName = 'Unknown') {
       // Store address in Firestore for future use
       if (db) {
         try {
+          // Check if we need to check for pending orders before saving the address
+          let processPendingOrders = true;
+
+          // First check for pending orders that specifically requested a new address
+          const newAddressOrdersSnapshot = await db.collection('pendingOrders')
+            .where('waId', '==', waId)
+            .where('status', '==', 'awaiting_address')
+            .where('addressSelectionMethod', '==', 'requested_new')
+            .get();
+
+          // If we have orders that specifically requested a new address
+          if (!newAddressOrdersSnapshot.empty) {
+            logger.info(`Found ${newAddressOrdersSnapshot.size} pending orders for ${waId} that requested a new address`);
+            // We'll process these orders with the new address, but we still want to update the contact's default address
+          }
+
           // Update the contact with address information
           await db.collection('contacts').doc(waId).set({
             address: addressData,
@@ -681,16 +902,9 @@ async function processMessage(message, waId, profileName = 'Unknown') {
 
           logger.info(`Address for ${waId} saved to Firestore`);
 
-          // Check for any pending orders for this customer
-          const pendingOrdersSnapshot = await db.collection('pendingOrders')
-            .where('waId', '==', waId)
-            .where('status', '==', 'awaiting_address')
-            .get();
-
-          if (!pendingOrdersSnapshot.empty) {
-            // We have pending orders to process
-            let pendingOrdersCount = pendingOrdersSnapshot.size;
-            logger.info(`Found ${pendingOrdersCount} pending orders for ${waId} after address collection`);
+          // Prioritize processing orders that specifically requested a new address
+          if (!newAddressOrdersSnapshot.empty) {
+            const pendingOrdersCount = newAddressOrdersSnapshot.size;
 
             // Send a message that we're processing their pending order(s)
             await sendWhatsAppMessage(
@@ -698,18 +912,19 @@ async function processMessage(message, waId, profileName = 'Unknown') {
               `Thank you for providing your delivery address! We're now processing your pending order${pendingOrdersCount > 1 ? 's' : ''}.`
             );
 
-            // Process each pending order
-            for (const doc of pendingOrdersSnapshot.docs) {
+            // Process each pending order that requested a new address
+            for (const doc of newAddressOrdersSnapshot.docs) {
               const pendingOrder = doc.data();
               const orderReference = doc.id;
 
               try {
-                logger.info(`Processing pending order ${orderReference} after address collection`);
+                logger.info(`Processing pending order ${orderReference} with newly provided address`);
 
                 // Update the order status
                 await db.collection('pendingOrders').doc(orderReference).update({
                   status: 'processing',
                   addressData: addressData,
+                  addressReplacedWith: 'new_address',
                   processingStartedAt: admin.firestore.Timestamp.now()
                 });
 
@@ -737,9 +952,8 @@ async function processMessage(message, waId, profileName = 'Unknown') {
                   processingCompletedAt: admin.firestore.Timestamp.now(),
                   orderResult: orderResult
                 });
-
               } catch (error) {
-                logger.error(`Error processing pending order ${orderReference} after address collection:`, error);
+                logger.error(`Error processing pending order ${orderReference} with new address:`, error);
 
                 // Update order status to failed
                 await db.collection('pendingOrders').doc(orderReference).update({
@@ -759,7 +973,97 @@ async function processMessage(message, waId, profileName = 'Unknown') {
               }
             }
 
-            return; // Skip the thank you message and catalog below since we processed orders
+            // We've processed the orders that specifically requested a new address
+            // No need to process other pending orders
+            processPendingOrders = false;
+          }
+
+          // Check for any regular pending orders for this customer
+          if (processPendingOrders) {
+            const pendingOrdersSnapshot = await db.collection('pendingOrders')
+              .where('waId', '==', waId)
+              .where('status', '==', 'awaiting_address')
+              .get();
+
+            if (!pendingOrdersSnapshot.empty) {
+              // We have pending orders to process
+              let pendingOrdersCount = pendingOrdersSnapshot.size;
+              logger.info(`Found ${pendingOrdersCount} pending orders for ${waId} after address collection`);
+
+              // Send a message that we're processing their pending order(s)
+              await sendWhatsAppMessage(
+                waId,
+                `Thank you for providing your delivery address! We're now processing your pending order${pendingOrdersCount > 1 ? 's' : ''}.`
+              );
+
+              // Process each pending order
+              for (const doc of pendingOrdersSnapshot.docs) {
+                const pendingOrder = doc.data();
+
+                // Skip orders that specifically requested a new address (already processed)
+                if (pendingOrder.addressSelectionMethod === 'requested_new') {
+                  continue;
+                }
+
+                const orderReference = doc.id;
+
+                try {
+                  logger.info(`Processing pending order ${orderReference} after address collection`);
+
+                  // Update the order status
+                  await db.collection('pendingOrders').doc(orderReference).update({
+                    status: 'processing',
+                    addressData: addressData,
+                    processingStartedAt: admin.firestore.Timestamp.now()
+                  });
+
+                  // Process the order with the new address
+                  const orderResult = await iposService.processOrderToiPOS(
+                    pendingOrder.orderData,
+                    waId,
+                    orderReference,
+                    pendingOrder.profileName,
+                    addressData
+                  );
+
+                  // Send order confirmation
+                  sendOrderConfirmation(
+                    pendingOrder.orderData,
+                    waId,
+                    orderResult,
+                    orderReference,
+                    pendingOrder.profileName
+                  );
+
+                  // Update order status to completed
+                  await db.collection('pendingOrders').doc(orderReference).update({
+                    status: 'completed',
+                    processingCompletedAt: admin.firestore.Timestamp.now(),
+                    orderResult: orderResult
+                  });
+                } catch (error) {
+                  logger.error(`Error processing pending order ${orderReference} after address collection:`, error);
+
+                  // Update order status to failed
+                  await db.collection('pendingOrders').doc(orderReference).update({
+                    status: 'failed',
+                    error: error.message,
+                    processingFailedAt: admin.firestore.Timestamp.now()
+                  });
+
+                  // Send basic confirmation even if processing failed
+                  sendOrderConfirmation(
+                    pendingOrder.orderData,
+                    waId,
+                    { success: false, error: error.message },
+                    orderReference,
+                    pendingOrder.profileName
+                  );
+                }
+              }
+
+              return; // Skip the thank you message and catalog below since we processed orders
+            }
           }
         } catch (error) {
           logger.error(`Error saving address or processing pending orders for ${waId}:`, error);
@@ -877,16 +1181,134 @@ async function processShoppingEvent(shopping, waId, metadata, profileName = 'Unk
         }, 1500);
 
         return; // Exit early - will process order when address is received
+      } else {
+        // We have an existing address - ask if they want to use it or add a new one
+        logger.info(`Asking ${waId} to use existing address or add new one for order ${orderReference}`);
+
+        // Format the existing address for display
+        let formattedAddress = "Unknown Address";
+
+        if (typeof addressData === 'string') {
+          formattedAddress = addressData;
+        } else if (addressData.addressText) {
+          formattedAddress = addressData.addressText;
+        } else if (addressData.flowResponse && addressData.flowResponse.screen_0_Address_0) {
+          formattedAddress = addressData.flowResponse.screen_0_Address_0;
+        } else if (addressData.street || addressData.city) {
+          // Standard address format
+          const addressComponents = [];
+          if (addressData.street) addressComponents.push(addressData.street);
+          if (addressData.building) addressComponents.push(addressData.building);
+          if (addressData.apartment) addressComponents.push(addressData.apartment);
+          if (addressData.city) addressComponents.push(addressData.city);
+          if (addressData.state) addressComponents.push(addressData.state);
+          if (addressData.zip) addressComponents.push(addressData.zip);
+          formattedAddress = addressComponents.filter(Boolean).join(", ");
+          if (addressData.landmark) {
+            formattedAddress += ` (Landmark: ${addressData.landmark})`;
+          }
+        }
+
+        // Store pending order in Firestore
+        if (db) {
+          await db.collection('pendingOrders').doc(orderReference).set({
+            waId: waId,
+            orderData: order,
+            profileName: profileName,
+            timestamp: admin.firestore.Timestamp.now(),
+            status: 'awaiting_address_confirmation',
+            existingAddress: addressData
+          });
+          logger.info(`Stored pending order ${orderReference} waiting for address confirmation`);
+        }
+
+        // Send order acknowledgment with address confirmation request
+        try {
+          // Send interactive message with buttons to choose delivery address
+          const response = await axios({
+            method: 'POST',
+            url: `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            headers: {
+              'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+              'Content-Type': 'application/json'
+            },
+            data: {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: waId,
+              type: 'interactive',
+              interactive: {
+                type: 'button',
+                header: {
+                  type: 'text',
+                  text: 'Delivery Address'
+                },
+                body: {
+                  text: `Thank you for your order! We have your delivery address on file:\n\n"${formattedAddress}"\n\nWould you like to use this address or add a new one?`
+                },
+                action: {
+                  buttons: [
+                    {
+                      type: 'reply',
+                      reply: {
+                        id: `use_existing_address:${orderReference}`,
+                        title: 'Use This Address'
+                      }
+                    },
+                    {
+                      type: 'reply',
+                      reply: {
+                        id: `add_new_address:${orderReference}`,
+                        title: 'Add New Address'
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          });
+
+          // Save interactive message to Firestore
+          if (db) {
+            try {
+              const messageData = {
+                from: process.env.WHATSAPP_PHONE_NUMBER_ID || 'bot',
+                to: waId,
+                timestamp: admin.firestore.Timestamp.now(),
+                messageId: response.data.messages?.[0]?.id,
+                type: 'interactive',
+                text: '[Address Confirmation Request]',
+                rawData: {
+                  type: 'address_confirmation_request',
+                  orderReference: orderReference,
+                  response: response.data
+                },
+                direction: 'outbound',
+                status: 'sent'
+              };
+
+              await db.collection('messages').add(messageData);
+            } catch (firestoreErr) {
+              logger.error('Error saving address confirmation request to Firestore:', firestoreErr);
+            }
+          }
+
+          logger.info(`Sent address confirmation request for order ${orderReference} to ${waId}`);
+          return; // Exit early - will process order when address is confirmed
+
+        } catch (error) {
+          logger.error(`Error sending address confirmation for order ${orderReference}:`, error);
+
+          // If interactive message fails, fallback to processing with existing address
+          logger.info(`Falling back to using existing address for order ${orderReference}`);
+
+          // Process the order and get the result
+          const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference, profileName, addressData);
+
+          // Send order confirmation message with the result info
+          sendOrderConfirmation(order, waId, orderResult, orderReference, profileName);
+        }
       }
-
-      // We have the address, proceed with order processing
-      logger.info(`Processing order ${orderReference} with existing address`);
-
-      // Process the order and get the result - pass the order reference, profile name and address for tracking
-      const orderResult = await iposService.processOrderToiPOS(order, waId, orderReference, profileName, addressData);
-
-      // Send order confirmation message with the result info
-      sendOrderConfirmation(order, waId, orderResult, orderReference, profileName);
     } catch (error) {
       logger.error(`Error processing order workflow for ${orderReference}:`, error);
 
@@ -1792,7 +2214,7 @@ async function sendCatalogMessage(to) {
     const attemptedMethods = [];
 
     // Get catalog ID and thumbnail ID from environment or use defaults
-    const catalogId = process.env.WHATSAPP_CATALOG_ID || '649587371247572';
+    const catalogId = process.env.WHATSAPP_CATALOG_ID || '116206601581617';
     const thumbnailId = process.env.CATALOG_THUMBNAIL_ID || 'A001044';
 
     // Common API request configuration
@@ -1930,7 +2352,8 @@ async function sendCatalogMessage(to) {
           attemptedMethods.push('catalog_url');
           try {
             // Try direct catalog URL approach
-            const catalogUrl = `https://wa.me/c/${process.env.WHATSAPP_PHONE_NUMBER_ID.replace(/\D/g, '')}`;
+            const whatsappNumber = process.env.WHATSAPP_BUSINESS_PHONE_NUMBER || '971543228294';
+            const catalogUrl = `https://wa.me/c/${whatsappNumber.replace(/\D/g, '')}`;
             const message = `🍽️ Check out our menu and place your order using this link: ${catalogUrl}`;
 
             const response = await sendWhatsAppMessage(to, message, {
