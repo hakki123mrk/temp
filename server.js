@@ -266,7 +266,23 @@ app.post('/webhook', (req, res) => {
   }
 });
 
-// Process Message Status Updates
+/**
+ * Process Message Status Updates
+ *
+ * This function handles status updates from WhatsApp for sent messages.
+ * WhatsApp will send status updates (sent, delivered, read) for each message,
+ * and this function processes those updates and stores them in Firestore.
+ *
+ * The status flow is typically:
+ * 1. Message is sent by our system -> status "sent"
+ * 2. Message is delivered to recipient's device -> status "delivered"
+ * 3. Message is read by the recipient -> status "read"
+ *
+ * We use a priority system to ensure that statuses only move forward
+ * (e.g., a "read" message doesn't go back to "delivered").
+ *
+ * The UI reads these status updates to display read receipts and delivery confirmations.
+ */
 async function processMessageStatus(status) {
   try {
     // Extract status information
@@ -1538,13 +1554,56 @@ app.post('/api/send-message', async (req, res) => {
   }
 });
 
-// Handle uncaught exceptions
+// Enhanced error handling
 process.on('uncaughtException', (error) => {
-  logger.error('Uncaught exception:', error);
+  logger.error('CRITICAL - Uncaught exception:', error);
+
+  // Create an error log file for critical errors
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const errorFile = `critical-error-${timestamp}.json`;
+    fs.writeFileSync(
+      path.join(dataDir, errorFile),
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        type: 'UncaughtException',
+        error: {
+          message: error.message,
+          stack: error.stack,
+          code: error.code
+        }
+      }, null, 2)
+    );
+    logger.info(`Error details saved to ${errorFile}`);
+  } catch (logError) {
+    logger.error('Failed to write error log:', logError);
+  }
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled rejection at:', promise, 'reason:', reason);
+  logger.error('CRITICAL - Unhandled promise rejection at:', promise);
+
+  // Create an error log file for critical errors
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const errorFile = `critical-rejection-${timestamp}.json`;
+    fs.writeFileSync(
+      path.join(dataDir, errorFile),
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        type: 'UnhandledRejection',
+        error: {
+          message: reason?.message || 'Unknown reason',
+          stack: reason?.stack,
+          details: reason
+        },
+        promise: String(promise)
+      }, null, 2)
+    );
+    logger.info(`Rejection details saved to ${errorFile}`);
+  } catch (logError) {
+    logger.error('Failed to write rejection log:', logError);
+  }
 });
 
 // Start server
