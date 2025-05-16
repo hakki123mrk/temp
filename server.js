@@ -38,6 +38,42 @@ try {
 }
 
 // Helper function to save message to Firestore
+// Determine if message is a content message or a system event
+function isContentMessage(type) {
+  return [
+    'text', 'image', 'audio', 'video', 'document',
+    'location', 'order', 'address', 'interactive'
+  ].includes(type);
+}
+
+// Determine if message is a system event
+function isSystemEvent(type, message) {
+  // Check for explicit event types
+  if (['system', 'status', 'event'].includes(type)) {
+    return true;
+  }
+
+  // Check for typing indicators in message metadata
+  if (message.type === 'typing' ||
+      (message.metadata && message.metadata.type === 'typing')) {
+    return true;
+  }
+
+  // Check for read receipt events
+  if (message.status === 'read' ||
+      (message.rawData && message.rawData.status === 'read')) {
+    return true;
+  }
+
+  // Check for delivery status events
+  if (message.status === 'delivered' ||
+      (message.rawData && message.rawData.status === 'delivered')) {
+    return true;
+  }
+
+  return false;
+}
+
 async function saveMessageToFirestore(message, waId, profileName = 'Unknown') {
   if (!db) {
     logger.error('Cannot save message to Firestore: Firebase not initialized');
@@ -45,29 +81,85 @@ async function saveMessageToFirestore(message, waId, profileName = 'Unknown') {
   }
 
   try {
-    // Prepare message data for Firestore
-    const messageData = {
+    // Determine if this is a content message or system event
+    const isEvent = isSystemEvent(message.type, message);
+    const isContent = isContentMessage(message.type);
+
+    // Prepare common data fields
+    const commonData = {
       from: waId,
       timestamp: admin.firestore.Timestamp.now(),
       messageId: message.id,
       type: message.type,
       senderName: profileName,
-      // Store message content based on type
-      text: message.type === 'text' ? message.text?.body || '' : '',
       // Store raw data for reference
       rawData: message
     };
 
-    // Add to Firestore messages collection
-    const result = await db.collection('messages').add(messageData);
-    logger.info(`Message from ${waId} saved to Firestore with ID: ${result.id}`);
+    // If this is a content message (not an event), store it in the main messages collection
+    if (isContent && !isEvent) {
+      // Add content-specific fields
+      const messageData = {
+        ...commonData,
+        // Store message content based on type
+        text: message.type === 'text' ? message.text?.body || '' : '',
+        // Message direction
+        direction: 'inbound'
+      };
 
-    // Update contact's last message time
-    await updateContactInFirestore(waId, profileName);
+      // Add to Firestore messages collection
+      const result = await db.collection('messages').add(messageData);
+      logger.info(`Content message from ${waId} saved to Firestore with ID: ${result.id}`);
 
-    return result.id;
+      // Update contact's last message time
+      await updateContactInFirestore(waId, profileName);
+
+      return { type: 'content', id: result.id };
+    }
+    // If this is a system event, store it in the systemEvents collection
+    else if (isEvent) {
+      // Add event-specific fields
+      const eventData = {
+        ...commonData,
+        // Extract event-specific data
+        eventType: message.status || message.type || 'unknown',
+        // Include related message ID if available
+        relatedMessageId: message.id || null,
+        // Message direction
+        direction: 'inbound',
+        // Event data
+        data: message
+      };
+
+      // Add to Firestore systemEvents collection
+      const result = await db.collection('systemEvents').add(eventData);
+      logger.info(`System event from ${waId} saved to Firestore with ID: ${result.id}`);
+
+      // Update contact's last event time - but don't reset the message window
+      // We only want actual messages to count toward the 24-hour window
+
+      return { type: 'event', id: result.id };
+    }
+    // For any other type, just store in the messages collection
+    else {
+      // Add to Firestore messages collection with fallback type
+      const messageData = {
+        ...commonData,
+        text: '',
+        direction: 'inbound'
+      };
+
+      const result = await db.collection('messages').add(messageData);
+      logger.info(`Unknown message type from ${waId} saved to Firestore with ID: ${result.id}`);
+
+      // Update contact's last message time
+      await updateContactInFirestore(waId, profileName);
+
+      return { type: 'unknown', id: result.id };
+    }
   } catch (error) {
     logger.error('Error saving message to Firestore:', error);
+    return null;
   }
 }
 
@@ -173,6 +265,41 @@ app.post('/webhook', (req, res) => {
     .catch(error => logger.error('Error in event logging workflow:', error));
 
   // Store critical webhook payloads to disk only if Firebase is unavailable and event logging is disabled
+  // Process typing indicators if present
+  if (body.entry?.[0]?.changes?.[0]?.value?.statuses?.[0]?.type === 'typing' ||
+      body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.type === 'typing') {
+
+    // Extract data from typing event
+    const typingEvent = body.entry?.[0]?.changes?.[0]?.value?.statuses?.[0] ||
+                        body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+
+    // Get sender information
+    let senderId = '';
+    if (body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id) {
+      senderId = body.entry[0].changes[0].value.contacts[0].wa_id;
+    } else if (typingEvent.from) {
+      senderId = typingEvent.from;
+    }
+
+    // Skip if no sender ID
+    if (!senderId) {
+      logger.warn('No sender ID found for typing event, skipping', { body });
+      return;
+    }
+
+    // Extract profile name if available
+    let profileName = 'Unknown';
+    if (body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name) {
+      profileName = body.entry[0].changes[0].value.contacts[0].profile.name;
+    }
+
+    // Process typing indicator
+    processTypingEvent(typingEvent, senderId, profileName)
+      .catch(error => {
+        logger.error('Error processing typing event:', error);
+      });
+  }
+
   if (process.env.ENABLE_FULL_EVENT_LOGGING !== 'true' && process.env.FIREBASE_FALLBACK === 'true') {
     // Only store critical events like orders
     const isOrderEvent = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.type === 'order' ||
@@ -290,6 +417,67 @@ app.post('/webhook', (req, res) => {
  *
  * The UI reads these status updates to display read receipts and delivery confirmations.
  */
+
+/**
+ * Process typing indicators from the webhook
+ *
+ * This handles typing indicators sent by WhatsApp users
+ * The UI uses these to show when a user is typing
+ */
+async function processTypingEvent(typingEvent, senderId, profileName = 'Unknown') {
+  try {
+    // Skip if Firestore is not initialized
+    if (!db) {
+      logger.warn('Skipping typing event: Firestore not initialized');
+      return;
+    }
+
+    // Create system event data
+    const eventData = {
+      type: 'typing',
+      eventType: 'typing',
+      timestamp: admin.firestore.Timestamp.now(),
+      from: senderId,
+      senderName: profileName,
+      direction: 'inbound',
+      data: typingEvent
+    };
+
+    // Save to systemEvents collection
+    const result = await db.collection('systemEvents').add(eventData);
+    logger.info(`Typing event from ${senderId} saved with ID: ${result.id}`);
+
+    // Auto-expire the typing indicator after 30 seconds
+    // This helps prevent false typing indicators if WhatsApp doesn't send a typing-off event
+    setTimeout(async () => {
+      try {
+        // Create an expiration event
+        const expirationData = {
+          type: 'typing',
+          eventType: 'typing_expired',
+          timestamp: admin.firestore.Timestamp.now(),
+          from: senderId,
+          senderName: profileName,
+          direction: 'inbound',
+          relatedEventId: result.id,
+          data: { status: 'expired', originalEvent: typingEvent }
+        };
+
+        // Save expiration event
+        await db.collection('systemEvents').add(expirationData);
+        logger.debug(`Typing event ${result.id} from ${senderId} auto-expired`);
+      } catch (error) {
+        logger.error(`Error expiring typing event ${result.id}:`, error);
+      }
+    }, 30000); // 30 seconds
+
+    return result.id;
+  } catch (error) {
+    logger.error('Error processing typing event:', error);
+    return null;
+  }
+}
+
 async function processMessageStatus(status) {
   try {
     // Extract status information
@@ -306,6 +494,23 @@ async function processMessageStatus(status) {
       return;
     }
 
+    // 1. Save the status as a system event for the new system events approach
+    const eventData = {
+      type: 'status',
+      eventType: statusType,
+      messageId: messageId,
+      relatedMessageId: messageId,
+      to: recipientId,
+      timestamp: admin.firestore.Timestamp.fromDate(timestamp),
+      direction: 'outbound',
+      data: status
+    };
+
+    // Add to systemEvents collection
+    const eventResult = await db.collection('systemEvents').add(eventData);
+    logger.info(`Status event saved to Firestore with ID: ${eventResult.id}`);
+
+    // 2. For backwards compatibility, also update the message status in the messages collection
     // Find the message in Firestore
     const messagesRef = db.collection('messages');
     const query = messagesRef.where('messageId', '==', messageId);
@@ -2797,26 +3002,113 @@ app.delete('/api/messages/:phoneNumber', async (req, res) => {
       .where('to', '==', phoneNumber)
       .get();
 
-    // Batch delete all matching messages
-    const batch = db.batch();
+    // Find all system events for this contact too
+    const eventsRef = db.collection('systemEvents');
+    const inboundEventsSnapshot = await eventsRef
+      .where('from', '==', phoneNumber)
+      .get();
 
-    // Delete inbound messages
-    snapshot.forEach(doc => {
-      batch.delete(doc.ref);
-    });
+    const outboundEventsSnapshot = await eventsRef
+      .where('to', '==', phoneNumber)
+      .get();
 
-    // Delete outbound messages
-    outboundSnapshot.forEach(doc => {
-      batch.delete(doc.ref);
-    });
+    // Count how many documents we'll delete
+    const totalDocs =
+      snapshot.size +
+      outboundSnapshot.size +
+      inboundEventsSnapshot.size +
+      outboundEventsSnapshot.size;
 
-    // Commit the batch
-    await batch.commit();
+    // Check if we need multiple batches (Firestore limit is 500 operations per batch)
+    if (totalDocs > 450) {
+      logger.info(`Large deletion of ${totalDocs} documents for ${phoneNumber}. Using multiple batches.`);
 
-    res.status(200).json({
-      success: true,
-      deletedCount: snapshot.size + outboundSnapshot.size
-    });
+      // Delete regular messages
+      let batch = db.batch();
+      let batchCount = 0;
+      let totalDeleted = 0;
+
+      // Helper to manage batch limits
+      const addToBatch = async (docRef) => {
+        batch.delete(docRef);
+        batchCount++;
+
+        // If batch is getting full, commit it and create a new one
+        if (batchCount >= 450) {
+          await batch.commit();
+          totalDeleted += batchCount;
+          logger.info(`Committed batch of ${batchCount} deletes, total: ${totalDeleted}`);
+          batch = db.batch();
+          batchCount = 0;
+        }
+      };
+
+      // Add all documents to batches
+      for (const doc of snapshot.docs) {
+        await addToBatch(doc.ref);
+      }
+
+      for (const doc of outboundSnapshot.docs) {
+        await addToBatch(doc.ref);
+      }
+
+      for (const doc of inboundEventsSnapshot.docs) {
+        await addToBatch(doc.ref);
+      }
+
+      for (const doc of outboundEventsSnapshot.docs) {
+        await addToBatch(doc.ref);
+      }
+
+      // Commit final batch if it has any operations
+      if (batchCount > 0) {
+        await batch.commit();
+        totalDeleted += batchCount;
+        logger.info(`Final batch committed, total ${totalDeleted} documents deleted`);
+      }
+
+      return res.status(200).json({
+        success: true,
+        deletedCount: totalDeleted
+      });
+    }
+    // Normal case - can use a single batch
+    else {
+      // Batch delete all matching messages and events
+      const batch = db.batch();
+
+      // Delete inbound messages
+      snapshot.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+
+      // Delete outbound messages
+      outboundSnapshot.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+
+      // Delete inbound events
+      inboundEventsSnapshot.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+
+      // Delete outbound events
+      outboundEventsSnapshot.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+
+      // Commit the batch
+      await batch.commit();
+
+      return res.status(200).json({
+        success: true,
+        deletedCount: totalDocs,
+        details: {
+          messages: snapshot.size + outboundSnapshot.size,
+          events: inboundEventsSnapshot.size + outboundEventsSnapshot.size
+        }
+      });
+    }
   } catch (error) {
     logger.error('Error clearing messages:', error);
     res.status(500).json({
@@ -3148,4 +3440,76 @@ app.listen(PORT, async () => {
 
   // Run initial data cleanup
   cleanupOldDataFiles();
+});
+
+// API endpoint to mark a message as read
+app.post('/api/messages/mark-read', async (req, res) => {
+  const { message_id } = req.body;
+
+  if (!message_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'Message ID is required'
+    });
+  }
+
+  // Check if we have proper credentials to make the call
+  const hasToken = !!process.env.WHATSAPP_TOKEN;
+  const hasPhoneNumberId = !!process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+  // If we don't have credentials, return mock success
+  if (!hasToken || !hasPhoneNumberId) {
+    logger.warn(`Cannot mark message as read: Missing WhatsApp credentials. Token: ${hasToken ? 'Present' : 'Missing'}, Phone Number ID: ${hasPhoneNumberId ? 'Present' : 'Missing'}`);
+
+    // Return mock success instead of error
+    return res.json({
+      success: true,
+      message: `Message ${message_id} marked as read (MOCK)`,
+      data: { status: "success" }
+    });
+  }
+
+  try {
+    // WhatsApp Cloud API endpoint for marking messages as read
+    // As per Facebook/Meta documentation:
+    // https://developers.facebook.com/docs/whatsapp/cloud-api/guides/mark-message-as-read/
+    const url = `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
+
+    // Prepare the request payload according to WhatsApp API docs
+    const payload = {
+      messaging_product: "whatsapp",
+      status: "read",
+      message_id: message_id
+    };
+
+    // Log token presence for debugging (don't log the actual token)
+    logger.info(`Sending mark as read request for message ${message_id} to WhatsApp API (Token: ${hasToken ? 'Present' : 'Missing'}, Phone ID: ${hasPhoneNumberId ? 'Present' : 'Missing'})`);
+
+    // Make the API request to WhatsApp
+    const response = await axios.post(url, payload, {
+      headers: {
+        'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    // Example successful response is simply { success: true }
+    logger.info(`Successfully marked message ${message_id} as read: ${JSON.stringify(response.data)}`);
+
+    return res.json({
+      success: true,
+      message: `Message ${message_id} marked as read`,
+      data: response.data
+    });
+  } catch (error) {
+    // Provide detailed error information but don't expose tokens
+    logger.error(`Error marking message ${message_id} as read: ${error.message || 'Unknown error'}`, error);
+
+    // Return a more graceful error response with HTTP 200 to prevent client errors
+    return res.json({
+      success: false,
+      error: error.message || 'Error marking message as read',
+      errorCode: error.response?.status || 500
+    });
+  }
 });
