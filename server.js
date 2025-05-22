@@ -10,6 +10,12 @@ const iposService = require('./simple-ipos');
 const productMapper = require('./product-mapper');
 const admin = require('firebase-admin');
 const cors = require('cors');
+const { Storage } = require('@google-cloud/storage');
+
+// Initialize Google Cloud Storage
+const storage = new Storage(); // Assumes GOOGLE_APPLICATION_CREDENTIALS is set
+const bucketName = process.env.GCS_BUCKET_NAME;
+logger.info(`GCS Bucket Name: ${bucketName || 'Not configured'}`);
 
 // Initialize Firebase Admin SDK
 let db; // Define db in wider scope to access across functions
@@ -160,6 +166,135 @@ async function saveMessageToFirestore(message, waId, profileName = 'Unknown') {
   } catch (error) {
     logger.error('Error saving message to Firestore:', error);
     return null;
+  }
+}
+
+/**
+ * Uploads a file buffer to Google Cloud Storage.
+ *
+ * @param {Buffer} fileBuffer - The buffer containing the file data.
+ * @param {string} destinationFileName - The desired filename in GCS (e.g., "images/image.jpg").
+ * @param {string} mimeType - The MIME type of the file (e.g., "image/jpeg").
+ * @returns {Promise<string>} The GCS URI of the uploaded file (e.g., "gs://bucket-name/path/to/file.jpg").
+ * @throws {Error} If GCS bucket is not configured or if upload fails.
+ */
+async function uploadToGCS(fileBuffer, destinationFileName, mimeType) {
+  if (!bucketName) {
+    logger.error('GCS_BUCKET_NAME is not configured. Cannot upload file.');
+    throw new Error('Google Cloud Storage bucket is not configured.');
+  }
+
+  try {
+    const bucket = storage.bucket(bucketName);
+    const file = bucket.file(destinationFileName);
+
+    logger.info(`Uploading ${destinationFileName} to GCS bucket ${bucketName} with MIME type ${mimeType}`);
+
+    return new Promise((resolve, reject) => {
+      const stream = file.createWriteStream({
+        metadata: {
+          contentType: mimeType,
+        },
+        resumable: false, // Consider true for large files
+      });
+
+      stream.on('error', (err) => {
+        logger.error(`Error uploading ${destinationFileName} to GCS:`, err);
+        reject(new Error(`Failed to upload to GCS: ${err.message}`));
+      });
+
+      stream.on('finish', async () => {
+        const gcsPath = `gs://${bucketName}/${destinationFileName}`;
+        logger.info(`${destinationFileName} uploaded successfully to ${gcsPath}`);
+        // Optional: Make file public (consider security implications)
+        // try {
+        //   await file.makePublic();
+        //   logger.info(`${destinationFileName} made public.`);
+        // } catch (publicError) {
+        //   logger.error(`Error making ${destinationFileName} public:`, publicError);
+        //   // Decide if this should cause a rejection or just a warning
+        // }
+        resolve(gcsPath);
+      });
+
+      stream.end(fileBuffer);
+    });
+  } catch (error) {
+    logger.error(`Unexpected error during GCS upload preparation for ${destinationFileName}:`, error);
+    throw new Error(`Failed to prepare GCS upload: ${error.message}`);
+  }
+}
+
+/**
+ * Download WhatsApp Media Helper
+ *
+ * Downloads media from WhatsApp given a media ID.
+ *
+ * @param {string} mediaId - The ID of the media to download.
+ * @returns {Promise<object>} - An object containing { fileBuffer, mimeType }.
+ * @throws {Error} - If media URL is not found or download fails.
+ */
+async function downloadWhatsAppMedia(mediaId) {
+  if (!mediaId) {
+    throw new Error('Media ID is required to download media.');
+  }
+
+  const whatsappToken = process.env.WHATSAPP_TOKEN;
+  if (!whatsappToken) {
+    logger.error('WHATSAPP_TOKEN is not set. Cannot download media.');
+    throw new Error('WhatsApp API token is not configured.');
+  }
+
+  try {
+    // Step 1: Get media metadata (including download URL)
+    logger.info(`Fetching media URL for media ID: ${mediaId}`);
+    const metadataResponse = await axios({
+      method: 'GET',
+      url: `https://graph.facebook.com/v19.0/${mediaId}`,
+      headers: {
+        'Authorization': `Bearer ${whatsappToken}`
+      }
+    });
+
+    const { url: mediaUrl, mime_type: mimeType } = metadataResponse.data;
+
+    if (!mediaUrl) {
+      logger.error('Failed to retrieve media URL.', { mediaId, responseData: metadataResponse.data });
+      throw new Error(`Failed to retrieve media URL for media ID: ${mediaId}`);
+    }
+    logger.info(`Retrieved media URL: ${mediaUrl} (MIME type: ${mimeType})`);
+
+    // Step 2: Download the actual media file
+    logger.info(`Downloading media from URL: ${mediaUrl}`);
+    const mediaResponse = await axios({
+      method: 'GET',
+      url: mediaUrl,
+      headers: {
+        'Authorization': `Bearer ${whatsappToken}`
+      },
+      responseType: 'arraybuffer'
+    });
+
+    logger.info(`Successfully downloaded media for ID: ${mediaId}. Size: ${mediaResponse.data.byteLength} bytes.`);
+
+    return {
+      fileBuffer: mediaResponse.data,
+      mimeType: mimeType
+    };
+
+  } catch (error) {
+    logger.error(`Error downloading WhatsApp media for ID ${mediaId}:`, {
+      message: error.message,
+      responseData: error.response?.data,
+      status: error.response?.status
+    });
+
+    if (error.response && error.response.status === 404) {
+      throw new Error(`Media not found (404) for ID: ${mediaId}. It may have expired or never existed.`);
+    } else if (error.response && error.response.status === 403) {
+      throw new Error(`Access denied (403) for media ID: ${mediaId}. Check token permissions or if the media is accessible.`);
+    }
+    throw new Error(`Failed to download media for ID ${mediaId}: ${error.message}`);
   }
 }
 
@@ -778,7 +913,72 @@ async function processMessage(message, waId, profileName = 'Unknown') {
     // Handle all non-order message types with appropriate messages and catalog
 
     // Log the message based on type
-    if (messageType === 'text') {
+    if (messageType === 'image' || messageType === 'audio') {
+      const mediaType = messageType; // 'image' or 'audio'
+      const mediaInfo = message[mediaType]; // message.image or message.audio
+      const mediaId = mediaInfo.id;
+      const mimeType = mediaInfo.mime_type;
+
+      logger.info(`Received ${mediaType} message from ${profileName} (${waId}) with media ID: ${mediaId}, MIME type: ${mimeType}`);
+
+      if (bucketName && mediaId) { // Only proceed if GCS is configured and mediaId is present
+        (async () => { // IIFE to handle async operations without blocking
+          try {
+            logger.info(`Attempting to download ${mediaType} with ID ${mediaId}`);
+            const mediaData = await downloadWhatsAppMedia(mediaId);
+
+            if (mediaData && mediaData.fileBuffer) {
+              const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+              let extension = mimeType.split('/')[1] || 'bin'; // Fallback to 'bin' if split fails
+              // Sanitize extension to prevent path traversal or invalid characters
+              extension = extension.replace(/[^a-zA-Z0-9]/g, ''); 
+              if (!extension) extension = 'bin'; // Ensure extension is not empty after sanitization
+
+              const destinationFileName = `media/${mediaType}s/${waId}/${timestamp}-${message.id}.${extension}`;
+
+              logger.info(`Attempting to upload ${mediaType} to GCS: ${destinationFileName}`);
+              const gcsPath = await uploadToGCS(mediaData.fileBuffer, destinationFileName, mediaData.mimeType);
+              logger.info(`Successfully uploaded ${mediaType} to GCS: ${gcsPath} for message ID: ${message.id}`);
+
+              // Optionally, update Firestore message entry with GCS path
+              if (db) {
+                try {
+                  const messagesRef = db.collection('messages');
+                  const query = messagesRef.where('messageId', '==', message.id).limit(1);
+                  const snapshot = await query.get();
+                  if (!snapshot.empty) {
+                    const docId = snapshot.docs[0].id;
+                    await messagesRef.doc(docId).update({
+                      gcsPath: gcsPath,
+                      [`${mediaType}GcsPath`]: gcsPath // more specific field
+                    });
+                    logger.info(`Updated Firestore message ${message.id} with GCS path: ${gcsPath}`);
+                  } else {
+                    logger.warn(`Could not find message ${message.id} in Firestore to update GCS path.`);
+                  }
+                } catch (firestoreError) {
+                  logger.error(`Error updating Firestore with GCS path for message ${message.id}:`, firestoreError);
+                }
+              }
+
+            } else {
+              logger.warn(`Failed to download ${mediaType} or fileBuffer is missing for media ID: ${mediaId}`);
+            }
+          } catch (error) {
+            logger.error(`Error processing ${mediaType} message for GCS upload (media ID: ${mediaId}):`, error);
+          }
+        })(); // Immediately invoke the async function
+      } else if (!bucketName) {
+        logger.warn(`GCS_BUCKET_NAME not configured. Skipping upload for ${mediaType} ID: ${mediaId}.`);
+      } else {
+        logger.warn(`No media ID found for ${mediaType} message. Skipping GCS upload. Message ID: ${message.id}`);
+      }
+
+      // Original handling for other text messages or fallbacks
+      sendWelcomeMessage(waId, profileName);
+      setTimeout(() => sendCatalogMessage(waId), 2000);
+
+    } else if (messageType === 'text') {
       logger.info(`Text message from ${profileName} (${waId}):`, {
         text: message.text.body,
         messageId: message.id,
@@ -1455,7 +1655,7 @@ async function processMessage(message, waId, profileName = 'Unknown') {
         sendCatalogMessage(waId);
       }, 2000);
     } else if (messageType === 'image' || messageType === 'video' || messageType === 'document') {
-      // Handle media messages
+      // Handle video and document messages (no GCS upload for now, just acknowledge)
       logger.info(`Media message (${messageType}) received from ${profileName} (${waId}):`, {
         mediaId: message[messageType].id,
         mimeType: message[messageType].mime_type || 'unknown'
@@ -1470,7 +1670,7 @@ async function processMessage(message, waId, profileName = 'Unknown') {
         sendCatalogMessage(waId);
       }, 2000);
     } else {
-      // Handle any other message type
+      // Handle any other message type (excluding image/audio which are handled above)
       logger.info(`Unspecified message type (${messageType}) from ${profileName} (${waId})`);
 
       // For unrecognized message types, send a general response
