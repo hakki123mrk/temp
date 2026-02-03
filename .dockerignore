@@ -1,0 +1,12 @@
+node_modules
+cdk
+.git
+.env
+data
+logs
+events
+*.log
+*.md
+samples
+.gitignore
+.dockerignore

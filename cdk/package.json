@@ -1,0 +1,16 @@
+{
+  "name": "whatsapp-webhook-cdk",
+  "version": "1.0.0",
+  "description": "CDK deployment for WhatsApp webhook",
+  "main": "app.js",
+  "scripts": {
+    "cdk": "cdk"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.120.0",
+    "constructs": "^10.3.0"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.120.0"
+  }
+}
