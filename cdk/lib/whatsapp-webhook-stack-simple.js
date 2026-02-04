@@ -243,6 +243,7 @@ async function processMessage(message, waId, profileName) {
       }).join('\\n');
 
       // Forward order to middleware API
+      let middlewareOrderId = orderRef; // Default to local reference
       try {
         const middlewarePayload = {
           channelOrderId: message.id,
@@ -261,21 +262,28 @@ async function processMessage(message, waId, profileName) {
           notes: order.text || ''
         };
 
-        await forwardOrderToMiddleware(middlewarePayload);
-        console.log(\`Order forwarded to middleware for \${orderRef}\`);
+        const middlewareResponse = await forwardOrderToMiddleware(middlewarePayload);
+        const responseData = JSON.parse(middlewareResponse.data);
+        
+        // Extract the actual order ID from middleware response
+        if (responseData.orderReferenceId) {
+          middlewareOrderId = responseData.orderReferenceId;
+        }
+        
+        console.log(\`Order forwarded to middleware: \${middlewareOrderId}\`);
       } catch (error) {
         console.error(\`Failed to forward order to middleware:\`, error);
       }
 
-      // Send order acknowledgment
+      // Send order acknowledgment with middleware order ID
       try {
         await sendWhatsAppMessage(
           phoneNumberId, token, waId,
-          \`✅ Order Received! (\${orderRef})\\n\\n📦 Your Order:\\n\${itemsList}\\n\\n💰 Total: AED \${totalAmount.toFixed(2)}\\n\\nWe're preparing your order now. You'll receive updates shortly!\`
+          \`✅ Order Received! (\${middlewareOrderId})\\n\\n📦 Your Order:\\n\${itemsList}\\n\\n💰 Total: AED \${totalAmount.toFixed(2)}\\n\\nWe're preparing your order now. You'll receive updates shortly!\`
         );
-        console.log(\`Order confirmation sent for \${orderRef}\`);
+        console.log(\`Order confirmation sent for \${middlewareOrderId}\`);
       } catch (error) {
-        console.error(\`Failed to send order confirmation for \${orderRef}:\`, error);
+        console.error(\`Failed to send order confirmation for \${middlewareOrderId}:\`, error);
       }
 
       // Simulate address collection (simplified - in production this would check Firebase)
@@ -284,7 +292,7 @@ async function processMessage(message, waId, profileName) {
           await sendInteractiveButtons(
             phoneNumberId, token, waId,
             'Delivery Address Required',
-            \`Great! To complete your order \${orderRef}, we need a delivery address.\\n\\nDo you have an address on file?\`,
+            \`Great! To complete your order \${middlewareOrderId}, we need a delivery address.\\n\\nDo you have an address on file?\`,
             [
               {
                 type: 'reply',
