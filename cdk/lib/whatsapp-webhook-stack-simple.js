@@ -53,6 +53,12 @@ class WhatsAppWebhookStack extends cdk.Stack {
       sortKey: { name: 'status', type: dynamodb.AttributeType.STRING },
     });
 
+    // GSI for querying all pending orders by user (without status filter)
+    pendingOrdersTable.addGlobalSecondaryIndex({
+      indexName: 'WaIdIndex',
+      partitionKey: { name: 'waId', type: dynamodb.AttributeType.STRING },
+    });
+
     // SQS Queue for order processing
     const orderQueue = new sqs.Queue(this, 'OrderProcessingQueue', {
       visibilityTimeout: cdk.Duration.seconds(300),
