@@ -111,6 +111,7 @@ async function handleStripePaymentSuccess(sessionId) {
       paymentMethod: 'online',
       paymentStatus: 'paid',
       stripeSessionId: sessionId,
+      isPrepaid: true,
       timestamp: Date.now()
     });
     
@@ -544,9 +545,12 @@ async function sendAddressConfirmationButtons(waId, orderRef, addressText) {
 }
 
 // Helper to send payment option buttons
-async function sendPaymentOptionButtons(waId, orderRef) {
+async function sendPaymentOptionButtons(waId, orderRef, orderType) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const token = process.env.WHATSAPP_API_TOKEN;
+  
+  // Change button text based on order type
+  const cashButtonText = orderType === 'takeaway' ? '💵 Pay at Counter' : '💵 Cash on Delivery';
   
   const buttons = [
     {
@@ -560,7 +564,7 @@ async function sendPaymentOptionButtons(waId, orderRef) {
       type: 'reply',
       reply: {
         id: `pay_cod:${orderRef}`,
-        title: '💵 Cash on Delivery'
+        title: cashButtonText
       }
     }
   ];
@@ -606,6 +610,67 @@ async function sendExistingOrderButtons(waId, existingOrderRef, existingStatus) 
     `You have an existing order:
 
 📦 Order: ${existingOrderRef}\n⏱️ Status: ${statusText}\n\nWhat would you like to do?`,
+    buttons
+  );
+}
+
+// Helper to send pending order reminder buttons
+async function sendPendingOrderReminder(waId, orderRef, status) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_API_TOKEN;
+  
+  const statusText = getOrderStatusText(status);
+  
+  // Determine next action based on status
+  let nextAction = '';
+  switch(status) {
+    case 'awaiting_order_type':
+      nextAction = '👉 Next step: Choose delivery or takeaway';
+      break;
+    case 'awaiting_address_confirmation':
+      nextAction = '👉 Next step: Confirm your delivery address';
+      break;
+    case 'awaiting_address':
+      nextAction = '👉 Next step: Provide your delivery address';
+      break;
+    case 'awaiting_payment_method':
+      nextAction = '👉 Next step: Choose payment method';
+      break;
+    case 'awaiting_payment':
+      nextAction = '👉 Next step: Complete your payment';
+      break;
+    default:
+      nextAction = '👉 Continue with your order';
+  }
+  
+  const buttons = [
+    {
+      type: 'reply',
+      reply: {
+        id: `continue_order:${orderRef}`,
+        title: '✅ Continue Order'
+      }
+    },
+    {
+      type: 'reply',
+      reply: {
+        id: `cancel_order:${orderRef}`,
+        title: '❌ Cancel Order'
+      }
+    }
+  ];
+  
+  await sendInteractiveButtons(
+    phoneNumberId,
+    token,
+    waId,
+    '📦 Pending Order',
+    `You have an incomplete order:
+
+📦 Order: ${orderRef}
+⏱️ Status: ${statusText}
+
+${nextAction}`,
     buttons
   );
 }
@@ -932,7 +997,7 @@ async function handleTakeawaySelected(orderRef, waId, profileName) {
   );
   
   await delay(500);
-  await sendPaymentOptionButtons(waId, orderRef);
+  await sendPaymentOptionButtons(waId, orderRef, 'takeaway');
 }
 
 // Handle interactive messages (button replies, list selections, flow responses)
@@ -988,6 +1053,16 @@ async function handleInteractiveMessage(message, waId, profileName) {
     else if (buttonId.startsWith('cancel_previous:')) {
       const orderRef = buttonId.split(':')[1];
       await handleCancelPreviousOrder(orderRef, waId, profileName);
+    }
+    // Continue with pending order
+    else if (buttonId.startsWith('continue_order:')) {
+      const orderRef = buttonId.split(':')[1];
+      await handleContinueOrder(orderRef, waId, profileName);
+    }
+    // Cancel pending order
+    else if (buttonId.startsWith('cancel_order:')) {
+      const orderRef = buttonId.split(':')[1];
+      await handleCancelOrder(orderRef, waId, profileName);
     }
   }
   
@@ -1113,6 +1188,86 @@ async function handleCancelPreviousOrder(orderRef, waId, profileName) {
   await sendOrderTypeButtons(waId, newOrderRef);
 }
 
+// User chose to continue with pending order
+async function handleContinueOrder(orderRef, waId, profileName) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_API_TOKEN;
+  
+  console.log(`User ${waId} chose to continue order ${orderRef}`);
+  
+  // Get the pending order
+  const pendingOrders = await getPendingOrdersByUser(waId);
+  const order = pendingOrders.find(o => o.orderRef === orderRef);
+  
+  if (!order) {
+    await sendWhatsAppMessage(
+      phoneNumberId, token, waId,
+      `❌ Sorry, I couldn't find your order. Please place a new order.`
+    );
+    return;
+  }
+  
+  // Just send the appropriate prompt based on current order status
+  // State is already correct, just need to prompt user for next step
+  if (order.status === 'awaiting_order_type') {
+    await sendOrderTypeButtons(waId, orderRef);
+  } else if (order.status === 'awaiting_address_confirmation' && order.existingAddress) {
+    await sendAddressConfirmationButtons(waId, orderRef, order.existingAddress.addressText);
+  } else if (order.status === 'awaiting_address') {
+    await sendAddressFlow(waId, orderRef);
+  } else if (order.status === 'awaiting_payment_method') {
+    await sendPaymentOptionButtons(waId, orderRef, order.orderType || 'delivery');
+  } else if (order.status === 'awaiting_payment') {
+    await sendWhatsAppMessage(
+      phoneNumberId, token, waId,
+      `💳 Please complete your payment using the link sent earlier to complete your order ${orderRef}.`
+    );
+  } else {
+    await sendWhatsAppMessage(
+      phoneNumberId, token, waId,
+      `✅ Order ${orderRef} is being processed!`
+    );
+  }
+}
+
+// User chose to cancel pending order
+async function handleCancelOrder(orderRef, waId, profileName) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_API_TOKEN;
+  
+  console.log(`User ${waId} chose to cancel order ${orderRef}`);
+  
+  // Get the pending order
+  const pendingOrders = await getPendingOrdersByUser(waId);
+  const order = pendingOrders.find(o => o.orderRef === orderRef);
+  
+  if (!order) {
+    await sendWhatsAppMessage(
+      phoneNumberId, token, waId,
+      `❌ Sorry, I couldn't find your order.`
+    );
+    return;
+  }
+  
+  // Cancel the order
+  await updatePendingOrder(orderRef, order.timestamp, {
+    status: 'cancelled_by_user',
+    cancelledAt: Date.now(),
+    cancelReason: 'user_requested'
+  });
+  
+  // Clear pending order reference and reset state
+  await updateContact(waId, profileName, {
+    conversationState: 'idle',
+    pendingOrderRef: null
+  });
+  
+  await sendWhatsAppMessage(
+    phoneNumberId, token, waId,
+    `✅ Your order ${orderRef} has been cancelled. You can place a new order anytime by browsing our catalog!`
+  );
+}
+
 // User chose to use existing address
 async function handleUseExistingAddress(orderRef, waId, profileName) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -1145,7 +1300,7 @@ async function handleUseExistingAddress(orderRef, waId, profileName) {
     );
     
     await delay(500);
-    await sendPaymentOptionButtons(waId, orderRef);
+    await sendPaymentOptionButtons(waId, orderRef, 'delivery');
   }
 }
 
@@ -1276,7 +1431,7 @@ async function handleAddressFlowResponse(message, waId, profileName) {
       );
       
       await delay(500);
-      await sendPaymentOptionButtons(waId, pendingOrders[0].orderRef);
+      await sendPaymentOptionButtons(waId, pendingOrders[0].orderRef, pendingOrders[0].orderType || 'delivery');
       
     } else {
       // No pending orders, just save address
@@ -1378,7 +1533,7 @@ async function handleCashOnDelivery(orderRef, waId, profileName) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const token = process.env.WHATSAPP_API_TOKEN;
   
-  console.log(`User ${waId} selected cash on delivery for order ${orderRef}`);
+  console.log(`User ${waId} selected cash payment for order ${orderRef}`);
   
   // Get pending order
   const pendingOrders = await getPendingOrdersByUser(waId, 'awaiting_payment_method');
@@ -1399,6 +1554,7 @@ async function handleCashOnDelivery(orderRef, waId, profileName) {
     addressData: order.confirmedAddress || order.addressData || null,
     addressMethod: order.addressMethod || 'not_required',
     paymentMethod: 'cod',
+    isPrepaid: false,
     timestamp: Date.now()
   });
   
@@ -1415,10 +1571,14 @@ async function handleCashOnDelivery(orderRef, waId, profileName) {
     pendingOrderRef: null
   });
   
-  // Send confirmation
+  // Send confirmation based on order type
+  const confirmationMessage = order.orderType === 'takeaway' 
+    ? `Perfect! 💵 Your order is confirmed. Pay at counter when picking up.\n\n✅ Processing your order now...`
+    : `Perfect! 💵 Your order is confirmed with Cash on Delivery.\n\n✅ Processing your order now...`;
+  
   await sendWhatsAppMessage(
     phoneNumberId, token, waId,
-    `Perfect! 💵 Your order is confirmed with Cash on Delivery.\n\n✅ Processing your order now...`
+    confirmationMessage
   );
 }
 
@@ -1458,19 +1618,28 @@ async function processMessage(message, waId, profileName) {
       if (lowerText === 'cancel') {
         const pendingOrders = await getPendingOrdersByUser(waId);
         if (pendingOrders && pendingOrders.length > 0) {
-          const order = pendingOrders[0];
-          await updatePendingOrder(order.orderRef, order.timestamp, {
-            status: 'cancelled_by_user',
-            cancelledAt: Date.now(),
-            cancelReason: 'user_requested'
-          });
+          // Cancel ALL pending orders, not just the first one
+          for (const order of pendingOrders) {
+            await updatePendingOrder(order.orderRef, order.timestamp, {
+              status: 'cancelled_by_user',
+              cancelledAt: Date.now(),
+              cancelReason: 'user_requested'
+            });
+          }
+          
           await updateContact(waId, profileName, { 
             conversationState: 'idle',
             pendingOrderRef: null
           });
+          
+          const orderCount = pendingOrders.length;
+          const message = orderCount === 1 
+            ? `✅ Your order ${pendingOrders[0].orderRef} has been cancelled. You can place a new order anytime!`
+            : `✅ All ${orderCount} pending orders have been cancelled. You can place a new order anytime!`;
+          
           await sendWhatsAppMessage(
             phoneNumberId, token, waId,
-            `✅ Your order ${order.orderRef} has been cancelled. You can place a new order anytime!`
+            message
           );
         } else {
           await sendWhatsAppMessage(
@@ -1506,11 +1675,8 @@ async function processMessage(message, waId, profileName) {
           );
           // Don't return here - allow the message to be processed normally
         } else {
-          const statusText = getOrderStatusText(order.status);
-          await sendWhatsAppMessage(
-            phoneNumberId, token, waId,
-            `You have a pending order:\n\n📦 Order: ${order.orderRef}\n⏱️ Status: ${statusText}\n\nPlease complete your current order or type "cancel" to cancel it.`
-          );
+          // Send buttons instead of text message
+          await sendPendingOrderReminder(waId, order.orderRef, order.status);
           return;
         }
       }
