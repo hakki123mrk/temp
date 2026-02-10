@@ -124,9 +124,10 @@ async function handleStripePaymentSuccess(sessionId) {
       queuedAt: Date.now()
     });
     
-    // Update conversation state
+    // Update conversation state and clear pending order reference
     await updateContact(waId, profileName, { 
-      conversationState: 'order_processing'
+      conversationState: 'order_processing',
+      pendingOrderRef: null
     });
     
     // Send confirmation to WhatsApp
@@ -773,6 +774,10 @@ async function handleOrderMessage(message, waId, profileName) {
         cancelledAt: Date.now(),
         cancelReason: 'timeout'
       });
+      // Clear pending order reference since it's cancelled
+      await updateContact(waId, profileName, {
+        pendingOrderRef: null
+      });
       console.log(`Auto-cancelled order ${pendingOrder.orderRef} due to timeout`);
     } else {
       // Store new order temporarily and ask user what to do with existing order
@@ -999,15 +1004,55 @@ async function handleKeepPreviousOrder(orderRef, waId, profileName) {
   
   console.log(`User ${waId} chose to keep previous order ${orderRef}`);
   
-  // Clear the pending new order
+  // Get the previous order to restore proper state
+  const pendingOrders = await getPendingOrdersByUser(waId);
+  const previousOrder = pendingOrders.find(o => o.orderRef === orderRef);
+  
+  if (!previousOrder) {
+    // If we can't find the order, just clear the conflict
+    await updateContact(waId, profileName, {
+      conversationState: 'idle',
+      pendingNewOrder: null
+    });
+    await sendWhatsAppMessage(
+      phoneNumberId, token, waId,
+      `❌ Sorry, I couldn't find your previous order. Please place a new order.`
+    );
+    return;
+  }
+  
+  // Restore conversation state to match the previous order's status
+  const conversationStateMap = {
+    'awaiting_order_type': 'awaiting_order_type',
+    'awaiting_address_type': 'awaiting_address_type',
+    'awaiting_payment_method': 'awaiting_payment_method',
+    'awaiting_payment': 'awaiting_payment'
+  };
+  
+  const restoredState = conversationStateMap[previousOrder.status] || 'idle';
+  
+  // Clear the pending new order and restore to previous order's state
   await updateContact(waId, profileName, {
-    conversationState: 'idle',
+    conversationState: restoredState,
+    pendingOrderRef: orderRef,
     pendingNewOrder: null
   });
   
+  // Send appropriate message based on where they were
+  let nextStepMessage = '';
+  if (previousOrder.status === 'awaiting_order_type') {
+    nextStepMessage = '\n\nPlease select delivery or takeaway to continue.';
+  } else if (previousOrder.status === 'awaiting_address_type') {
+    nextStepMessage = '\n\nPlease provide your delivery address to continue.';
+  } else if (previousOrder.status === 'awaiting_payment_method') {
+    nextStepMessage = '\n\nPlease select your payment method to continue.';
+  } else if (previousOrder.status === 'awaiting_payment') {
+    nextStepMessage = '\n\nPlease complete your payment to continue.';
+  }
+  
   await sendWhatsAppMessage(
     phoneNumberId, token, waId,
-    `✅ Your previous order (${orderRef}) will continue. The new order has been discarded.\n\nPlease complete your current order first.`
+    `✅ Your previous order (${orderRef}) will continue. The new order has been discarded.${nextStepMessage}`
   );
 }
 
@@ -1364,9 +1409,10 @@ async function handleCashOnDelivery(orderRef, waId, profileName) {
     queuedAt: Date.now()
   });
   
-  // Update conversation state
+  // Update conversation state and clear pending order reference
   await updateContact(waId, profileName, { 
-    conversationState: 'order_processing'
+    conversationState: 'order_processing',
+    pendingOrderRef: null
   });
   
   // Send confirmation
@@ -1449,10 +1495,16 @@ async function processMessage(message, waId, profileName) {
             cancelledAt: Date.now(),
             cancelReason: 'timeout'
           });
+          // Clear pending order reference and reset state
+          await updateContact(waId, profileName, {
+            conversationState: 'idle',
+            pendingOrderRef: null
+          });
           await sendWhatsAppMessage(
             phoneNumberId, token, waId,
             `⚠️ Your previous order ${order.orderRef} has been cancelled due to timeout (30 minutes). Please place a new order.`
           );
+          // Don't return here - allow the message to be processed normally
         } else {
           const statusText = getOrderStatusText(order.status);
           await sendWhatsAppMessage(
