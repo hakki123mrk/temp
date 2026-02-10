@@ -96,7 +96,7 @@ class WhatsAppWebhookStack extends cdk.Stack {
         CONTACTS_TABLE_NAME: contactsTable.tableName,
         PENDING_ORDERS_TABLE_NAME: pendingOrdersTable.tableName,
         WHATSAPP_PHONE_NUMBER_ID: '116206601581617',
-        WHATSAPP_API_TOKEN: 'YOUR_WHATSAPP_API_TOKEN'
+        WHATSAPP_API_TOKEN: process.env.WHATSAPP_API_TOKEN || 'YOUR_WHATSAPP_API_TOKEN'
       },
       description: 'Processes orders from SQS queue'
     });
