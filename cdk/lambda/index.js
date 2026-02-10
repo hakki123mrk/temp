@@ -1019,11 +1019,28 @@ async function handlePayOnline(orderRef, waId, profileName) {
       pendingOrderRef: orderRef
     });
     
-    // Send payment link
-    await sendWhatsAppMessage(
-      phoneNumberId, token, waId,
-      `💳 Complete your payment securely:\n\n${session.url}\n\n✅ Click the link to pay with your card.\n⏱️ Link expires in 30 minutes.\n\nTotal: AED ${totalAmount.toFixed(2)}`
-    );
+    // Send payment link as button
+    const paymentMessage = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: waId,
+      type: 'interactive',
+      interactive: {
+        type: 'cta_url',
+        body: {
+          text: `💳 *Complete Your Payment*\n\nTotal: AED ${totalAmount.toFixed(2)}\n\n✅ Click the button below to pay securely with your card.\n⏱️ Link expires in 30 minutes.`
+        },
+        action: {
+          name: 'cta_url',
+          parameters: {
+            display_text: 'Pay Now',
+            url: session.url
+          }
+        }
+      }
+    };
+    
+    await makeWhatsAppRequest(phoneNumberId, token, JSON.stringify(paymentMessage));
     
   } catch (error) {
     console.error('Error creating Stripe checkout:', error);
@@ -1285,10 +1302,12 @@ exports.handler = async (event) => {
     console.log('Payment success redirect:', sessionId);
     
     if (sessionId) {
-      // Trigger payment processing asynchronously
-      handleStripePaymentSuccess(sessionId).catch(err => {
+      // Process payment before returning response
+      try {
+        await handleStripePaymentSuccess(sessionId);
+      } catch (err) {
         console.error('Error processing payment success:', err);
-      });
+      }
     }
     
     return {

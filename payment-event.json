@@ -1,0 +1,11 @@
+﻿{
+  "resource": "/{proxy+}",
+  "path": "/payment-success",
+  "httpMethod": "GET",
+  "queryStringParameters": {
+    "session_id": "cs_live_a15juDPuRtUIK5RA5rkbR83UKZKPVgjFmNK1g3aZFcvaqp7c1fMgdMRYEX"
+  },
+  "headers": {},
+  "body": null,
+  "isBase64Encoded": false
+}
