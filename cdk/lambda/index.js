@@ -58,6 +58,21 @@ function getProductName(productId) {
   return productCatalog.get(productId) || `Product #${productId}`;
 }
 
+// Get readable order status text
+function getOrderStatusText(status) {
+  const statusMap = {
+    'awaiting_order_type': 'Waiting for delivery/takeaway selection',
+    'awaiting_address_confirmation': 'Waiting for address confirmation',
+    'awaiting_address': 'Waiting for delivery address',
+    'awaiting_payment_method': 'Waiting for payment method selection',
+    'awaiting_payment': 'Waiting for payment completion',
+    'queued_for_processing': 'Being processed',
+    'cancelled_timeout': 'Cancelled (timeout)',
+    'cancelled_by_user': 'Cancelled by you'
+  };
+  return statusMap[status] || status;
+}
+
 // Handle Stripe payment success
 async function handleStripePaymentSuccess(sessionId) {
   try {
@@ -241,16 +256,38 @@ async function savePendingOrder(orderRef, waId, profileName, orderData, status, 
 
 async function getPendingOrdersByUser(waId, status) {
   try {
-    const result = await docClient.send(new QueryCommand({
-      TableName: PENDING_ORDERS_TABLE,
-      IndexName: 'WaIdStatusIndex',
-      KeyConditionExpression: 'waId = :waId AND #status = :status',
-      ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: {
-        ':waId': waId,
-        ':status': status
+    let result;
+    if (status) {
+      // Query with specific status
+      result = await docClient.send(new QueryCommand({
+        TableName: PENDING_ORDERS_TABLE,
+        IndexName: 'WaIdStatusIndex',
+        KeyConditionExpression: 'waId = :waId AND #status = :status',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':waId': waId,
+          ':status': status
+        }
+      }));
+    } else {
+      // Query all orders for user (excluding cancelled and processed in code)
+      result = await docClient.send(new QueryCommand({
+        TableName: PENDING_ORDERS_TABLE,
+        KeyConditionExpression: 'waId = :waId',
+        ExpressionAttributeValues: {
+          ':waId': waId
+        }
+      }));
+      
+      // Filter out cancelled and processed orders in code
+      if (result.Items) {
+        result.Items = result.Items.filter(item => 
+          item.status !== 'cancelled_timeout' && 
+          item.status !== 'cancelled_by_user' && 
+          item.status !== 'queued_for_processing'
+        );
       }
-    }));
+    }
     return result.Items || [];
   } catch (error) {
     console.error('Error getting pending orders:', error);
@@ -391,6 +428,44 @@ async function sendInteractiveButtons(phoneNumberId, token, to, header, body, bu
       header: { type: 'text', text: header },
       body: { text: body },
       action: { buttons: buttons }
+    }
+  });
+
+  return makeWhatsAppRequest(phoneNumberId, token, data);
+}
+
+// Helper function to send WhatsApp Flow
+async function sendWhatsAppFlow(phoneNumberId, token, to, flowId, flowToken, headerText, bodyText, footerText, ctaText) {
+  const data = JSON.stringify({
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: to,
+    type: 'interactive',
+    interactive: {
+      type: 'flow',
+      header: {
+        type: 'text',
+        text: headerText
+      },
+      body: {
+        text: bodyText
+      },
+      footer: {
+        text: footerText
+      },
+      action: {
+        name: 'flow',
+        parameters: {
+          flow_message_version: '3',
+          flow_token: flowToken,
+          flow_id: flowId,
+          flow_cta: ctaText,
+          flow_action: 'navigate',
+          flow_action_payload: {
+            screen: 'RECOMMEND'
+          }
+        }
+      }
     }
   });
 
@@ -643,6 +718,32 @@ async function handleOrderMessage(message, waId, profileName) {
   
   console.log(`Order received from ${profileName} with ${items.length} items`);
   
+  // Check for existing pending orders
+  const existingOrders = await getPendingOrdersByUser(waId);
+  if (existingOrders && existingOrders.length > 0) {
+    const pendingOrder = existingOrders[0];
+    const orderAge = Date.now() - pendingOrder.timestamp;
+    const thirtyMinutes = 30 * 60 * 1000;
+    
+    // If order is older than 30 minutes, auto-cancel it
+    if (orderAge > thirtyMinutes) {
+      await updatePendingOrder(pendingOrder.orderRef, pendingOrder.timestamp, {
+        status: 'cancelled_timeout',
+        cancelledAt: Date.now(),
+        cancelReason: 'timeout'
+      });
+      console.log(`Auto-cancelled order ${pendingOrder.orderRef} due to timeout`);
+    } else {
+      // Show existing order and ask to continue or cancel
+      const statusText = getOrderStatusText(pendingOrder.status);
+      await sendWhatsAppMessage(
+        phoneNumberId, token, waId,
+        `You have an existing order in progress:\n\n📦 Order: ${pendingOrder.orderRef}\n⏱️ Status: ${statusText}\n\nPlease complete or cancel your current order before placing a new one. Type "cancel" to cancel the current order.`
+      );
+      return;
+    }
+  }
+  
   // Generate order reference
   const orderRef = `ORD-${Date.now()}-${waId.slice(-4)}`;
   
@@ -887,10 +988,18 @@ async function handleRequestNewAddress(orderRef, waId, profileName) {
       pendingOrderRef: orderRef
     });
     
-    // Send message
-    await sendWhatsAppMessage(
+    // Send WhatsApp Flow for address collection
+    const flowId = '2029105360982410';
+    const flowToken = `address_${orderRef}_${Date.now()}`;
+    
+    await sendWhatsAppFlow(
       phoneNumberId, token, waId,
-      `No problem! 📍 Please send me your complete delivery address including:\n- Street/Building\n- Area\n- City\n- Landmarks (if any)`
+      flowId,
+      flowToken,
+      '📍 Delivery Address',
+      'Please provide your complete delivery address. We\'ll save this for faster checkout next time!',
+      'Powered by iPOS',
+      'Enter Address'
     );
   }
 }
@@ -912,14 +1021,42 @@ async function handleAddressFlowResponse(message, waId, profileName) {
         ? JSON.parse(message.interactive.nfm_reply.response_json)
         : message.interactive.nfm_reply.response_json;
       
+      console.log('Flow response received:', JSON.stringify(responseJson, null, 2));
+      
+      // Extract fields from your Flow structure
+      const apartment = responseJson.screen_0_Appartment_Building_0 || '';
+      const street = responseJson.screen_0_Street_1 || '';
+      const landmark = responseJson.screen_0_Landmark_2 || '';
+      const city = responseJson.screen_0_City_3 || '';
+      const emirateId = responseJson.screen_0_Emirate_4 || '';
+      
+      // Extract emirate name from ID (format: "0_Dubai" -> "Dubai")
+      const emirate = emirateId ? emirateId.split('_').slice(1).join(' ') : '';
+      
+      // Build formatted address text
+      const addressParts = [
+        apartment,
+        street,
+        landmark,
+        city,
+        emirate
+      ].filter(part => part && part.trim() !== '');
+      
+      const formattedAddress = addressParts.join(', ');
+      
       addressData = {
-        addressText: responseJson.screen_0_Address_0 || responseJson.address || 'Address provided via flow',
+        addressText: formattedAddress,
+        apartment,
+        street,
+        landmark,
+        city,
+        emirate,
         flowResponse: responseJson,
         updatedAt: Date.now()
       };
     }
     
-    console.log(`Address received from ${waId}`);
+    console.log(`Address received from ${waId}: ${addressData.addressText}`);
     
     // Save address to contact
     await updateContact(waId, profileName, { 
@@ -1135,7 +1272,7 @@ async function processMessage(message, waId, profileName) {
           updatedAt: Date.now()
         };
         
-        // Save address and process pending orders
+        // Save address to contact
         await updateContact(waId, profileName, { 
           address: addressData,
           conversationState: 'address_received'
@@ -1144,32 +1281,39 @@ async function processMessage(message, waId, profileName) {
         const pendingOrders = await getPendingOrdersByUser(waId, 'awaiting_address');
         
         if (pendingOrders.length > 0) {
-          await sendWhatsAppMessage(
-            phoneNumberId, token, waId,
-            `Thank you for the address! ✅ Processing your order${pendingOrders.length > 1 ? 's' : ''} now...`
-          );
+          console.log(`Found ${pendingOrders.length} pending orders for ${waId}`);
           
+          // Update orders with address and status to awaiting payment method
           for (const order of pendingOrders) {
-            await sendToOrderQueue({
-              orderRef: order.orderRef,
-              waId,
-              profileName,
-              orderData: order.orderData,
-              addressData,
-              addressMethod: 'text_message',
-              timestamp: Date.now()
-            });
-            
             await updatePendingOrder(order.orderRef, order.timestamp, {
-              status: 'queued_for_processing',
+              status: 'awaiting_payment_method',
               addressData,
-              addressMethod: 'text_message',
-              queuedAt: Date.now()
+              addressMethod: 'text_message'
             });
           }
           
+          // Update conversation state to awaiting payment method
           await updateContact(waId, profileName, { 
-            conversationState: 'order_processing'
+            conversationState: 'awaiting_payment_method',
+            pendingOrderRef: pendingOrders[0].orderRef
+          });
+          
+          await sendWhatsAppMessage(
+            phoneNumberId, token, waId,
+            `Thank you! ✅ Your address has been saved.`
+          );
+          
+          await delay(500);
+          await sendPaymentOptionButtons(waId, pendingOrders[0].orderRef);
+        } else {
+          // No pending orders, just save address
+          await sendWhatsAppMessage(
+            phoneNumberId, token, waId,
+            `Great! ✅ Your delivery address has been saved for future orders.`
+          );
+          
+          await updateContact(waId, profileName, { 
+            conversationState: 'idle'
           });
         }
         return;
@@ -1177,6 +1321,61 @@ async function processMessage(message, waId, profileName) {
 
       // Regular text message handling
       const lowerText = text.toLowerCase().trim();
+      
+      // Check for cancel command
+      if (lowerText === 'cancel') {
+        const pendingOrders = await getPendingOrdersByUser(waId);
+        if (pendingOrders && pendingOrders.length > 0) {
+          const order = pendingOrders[0];
+          await updatePendingOrder(order.orderRef, order.timestamp, {
+            status: 'cancelled_by_user',
+            cancelledAt: Date.now(),
+            cancelReason: 'user_requested'
+          });
+          await updateContact(waId, profileName, { 
+            conversationState: 'idle',
+            pendingOrderRef: null
+          });
+          await sendWhatsAppMessage(
+            phoneNumberId, token, waId,
+            `✅ Your order ${order.orderRef} has been cancelled. You can place a new order anytime!`
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumberId, token, waId,
+            `You don't have any pending orders to cancel.`
+          );
+        }
+        return;
+      }
+      
+      // Check for existing pending orders when user sends any message
+      const existingOrders = await getPendingOrdersByUser(waId);
+      if (existingOrders && existingOrders.length > 0) {
+        const order = existingOrders[0];
+        const orderAge = Date.now() - order.timestamp;
+        const thirtyMinutes = 30 * 60 * 1000;
+        
+        // Auto-cancel if older than 30 minutes
+        if (orderAge > thirtyMinutes) {
+          await updatePendingOrder(order.orderRef, order.timestamp, {
+            status: 'cancelled_timeout',
+            cancelledAt: Date.now(),
+            cancelReason: 'timeout'
+          });
+          await sendWhatsAppMessage(
+            phoneNumberId, token, waId,
+            `⚠️ Your previous order ${order.orderRef} has been cancelled due to timeout (30 minutes). Please place a new order.`
+          );
+        } else {
+          const statusText = getOrderStatusText(order.status);
+          await sendWhatsAppMessage(
+            phoneNumberId, token, waId,
+            `You have a pending order:\n\n📦 Order: ${order.orderRef}\n⏱️ Status: ${statusText}\n\nPlease complete your current order or type "cancel" to cancel it.`
+          );
+          return;
+        }
+      }
       
       if (lowerText === 'hi' || lowerText === 'hello' || lowerText === 'hey') {
         await sendCatalogButton(

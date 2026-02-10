@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+require('dotenv').config();
 const cdk = require('aws-cdk-lib');
 const { WhatsAppWebhookStack } = require('./lib/whatsapp-webhook-stack-simple');
 
