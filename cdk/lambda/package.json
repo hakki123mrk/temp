@@ -1,0 +1,9 @@
+{
+  "name": "whatsapp-webhook-lambdas",
+  "version": "1.0.0",
+  "description": "WhatsApp webhook handlers with Stripe payment integration",
+  "main": "index.js",
+  "dependencies": {
+    "stripe": "^14.15.0"
+  }
+}
