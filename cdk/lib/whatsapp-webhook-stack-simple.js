@@ -75,10 +75,10 @@ class WhatsAppWebhookStack extends cdk.Stack {
         NODE_ENV: 'production',
         VERIFY_TOKEN: 'wbYWVNbLn1hbOJF5wE6tJQughSMZAR8UvZB85dYiJBDlO',
         WHATSAPP_PHONE_NUMBER_ID: '116206601581617',
-        WHATSAPP_API_TOKEN: 'YOUR_WHATSAPP_API_TOKEN',
+        WHATSAPP_API_TOKEN: process.env.WHATSAPP_API_TOKEN || 'YOUR_WHATSAPP_API_TOKEN',
         WHATSAPP_CATALOG_ID: '116206601581617',
         CATALOG_THUMBNAIL_ID: 'A001044',
-        STRIPE_SECRET_KEY: 'YOUR_STRIPE_SECRET_KEY',
+        STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || 'YOUR_STRIPE_SECRET_KEY',
         WEBHOOK_BASE_URL: 'https://g6t3xzuzy7.execute-api.me-central-1.amazonaws.com/prod'
       },
       description: 'WhatsApp Commerce Webhook Handler'
