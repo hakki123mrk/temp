@@ -120,7 +120,7 @@ async function handleStripePaymentSuccess(sessionId) {
     
     await sendWhatsAppMessage(
       phoneNumberId, token, waId,
-      `✅ Payment received! Your order is being processed now...\n\nOrder: ${orderRef}`
+      `✅ Payment received! Your order is being processed now...\n\n💳 Payment Reference: ${session.payment_intent}`
     );
     
     console.log(`Successfully processed payment for order ${orderRef}`);
@@ -1314,21 +1314,147 @@ exports.handler = async (event) => {
       statusCode: 200,
       headers: { 'Content-Type': 'text/html' },
       body: `
-        <html>
+        <!DOCTYPE html>
+        <html lang="en">
           <head>
-            <title>Payment Successful</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Payment Successful - iPOS</title>
             <style>
-              body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-              .success { color: #4CAF50; font-size: 24px; margin: 20px; }
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 50%, #0f0f0f 100%);
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+              }
+              .container {
+                background: rgba(255, 255, 255, 0.05);
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+                padding: 50px 40px;
+                max-width: 500px;
+                width: 100%;
+                text-align: center;
+                animation: slideUp 0.6s ease;
+              }
+              @keyframes slideUp {
+                from { opacity: 0; transform: translateY(30px); }
+                to { opacity: 1; transform: translateY(0); }
+              }
+              .logo {
+                margin-bottom: 30px;
+                animation: fadeIn 0.8s ease;
+              }
+              .logo img {
+                max-width: 180px;
+                height: auto;
+              }
+              .success-icon {
+                width: 80px;
+                height: 80px;
+                background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin: 0 auto 25px;
+                animation: scaleIn 0.5s ease 0.3s both;
+              }
+              @keyframes scaleIn {
+                from { transform: scale(0); }
+                to { transform: scale(1); }
+              }
+              .success-icon svg {
+                width: 45px;
+                height: 45px;
+                stroke: white;
+                stroke-width: 3;
+                fill: none;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+              }
+              .checkmark {
+                stroke-dasharray: 50;
+                stroke-dashoffset: 50;
+                animation: drawCheck 0.5s ease 0.8s forwards;
+              }
+              @keyframes drawCheck {
+                to { stroke-dashoffset: 0; }
+              }
+              h1 {
+                color: #10b981;
+                font-size: 32px;
+                font-weight: 700;
+                margin-bottom: 15px;
+                animation: fadeIn 0.8s ease 0.4s both;
+              }
+              @keyframes fadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+              }
+              .message {
+                color: #d1d5db;
+                font-size: 16px;
+                line-height: 1.6;
+                margin-bottom: 12px;
+                animation: fadeIn 0.8s ease 0.6s both;
+              }
+              .highlight {
+                color: #10b981;
+                font-weight: 600;
+              }
+              .whatsapp-note {
+                background: rgba(16, 185, 129, 0.1);
+                border-left: 4px solid #10b981;
+                padding: 15px;
+                border-radius: 8px;
+                margin: 25px 0;
+                animation: fadeIn 0.8s ease 0.8s both;
+              }
+              .whatsapp-note p {
+                color: #e5e7eb;
+                font-size: 14px;
+                margin: 0;
+              }
+              .auto-close {
+                color: #6b7280;
+                font-size: 13px;
+                margin-top: 20px;
+                animation: fadeIn 0.8s ease 1s both;
+              }
+              @media (max-width: 480px) {
+                .container { padding: 40px 25px; }
+                h1 { font-size: 26px; }
+                .logo img { max-width: 150px; }
+              }
             </style>
           </head>
           <body>
-            <div class="success">✅ Payment Successful!</div>
-            <p>Your order is being processed.</p>
-            <p>You will receive a confirmation on WhatsApp shortly.</p>
-            <p>You can close this window now.</p>
+            <div class="container">
+              <div class="logo">
+                <img src="https://ipossoft.com/wp-content/uploads/2024/11/ipos-soft-logo.png" alt="iPOS">
+              </div>
+              <div class="success-icon">
+                <svg viewBox="0 0 52 52">
+                  <path class="checkmark" d="M14 27l7 7 16-16"/>
+                </svg>
+              </div>
+              <h1>Payment Successful!</h1>
+              <p class="message">Thank you for your payment. Your order is now <span class="highlight">being processed</span>.</p>
+              <div class="whatsapp-note">
+                <p>📱 You will receive a <strong>confirmation message</strong> on WhatsApp shortly with your order details.</p>
+              </div>
+              <p class="message">This window will close automatically in a few seconds.</p>
+              <p class="auto-close">Powered by iPOS</p>
+            </div>
             <script>
-              setTimeout(function() {  window.close(); }, 3000);
+              setTimeout(function() { window.close(); }, 5000);
             </script>
           </body>
         </html>
@@ -1342,19 +1468,131 @@ exports.handler = async (event) => {
       statusCode: 200,
       headers: { 'Content-Type': 'text/html' },
       body: `
-        <html>
+        <!DOCTYPE html>
+        <html lang="en">
           <head>
-            <title>Payment Cancelled</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Payment Cancelled - iPOS</title>
             <style>
-              body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-              .cancelled { color: #f44336; font-size: 24px; margin: 20px; }
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 50%, #0f0f0f 100%);
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+              }
+              .container {
+                background: rgba(255, 255, 255, 0.05);
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+                padding: 50px 40px;
+                max-width: 500px;
+                width: 100%;
+                text-align: center;
+                animation: slideUp 0.6s ease;
+              }
+              @keyframes slideUp {
+                from { opacity: 0; transform: translateY(30px); }
+                to { opacity: 1; transform: translateY(0); }
+              }
+              .logo {
+                margin-bottom: 30px;
+              }
+              .logo img {
+                max-width: 180px;
+                height: auto;
+              }
+              .cancel-icon {
+                width: 80px;
+                height: 80px;
+                background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin: 0 auto 25px;
+                animation: scaleIn 0.5s ease 0.3s both;
+              }
+              @keyframes scaleIn {
+                from { transform: scale(0); }
+                to { transform: scale(1); }
+              }
+              .cancel-icon svg {
+                width: 45px;
+                height: 45px;
+                stroke: white;
+                stroke-width: 3;
+                fill: none;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+              }
+              h1 {
+                color: #ef4444;
+                font-size: 32px;
+                font-weight: 700;
+                margin-bottom: 15px;
+              }
+              .message {
+                color: #d1d5db;
+                font-size: 16px;
+                line-height: 1.6;
+                margin-bottom: 12px;
+              }
+              .options-box {
+                background: rgba(239, 68, 68, 0.1);
+                border-left: 4px solid #ef4444;
+                padding: 20px;
+                border-radius: 8px;
+                margin: 25px 0;
+              }
+              .options-box p {
+                color: #e5e7eb;
+                font-size: 14px;
+                margin: 8px 0;
+              }
+              .options-box strong {
+                color: #ef4444;
+              }
+              .footer {
+                color: #6b7280;
+                font-size: 13px;
+                margin-top: 20px;
+              }
+              @media (max-width: 480px) {
+                .container { padding: 40px 25px; }
+                h1 { font-size: 26px; }
+                .logo img { max-width: 150px; }
+              }
             </style>
           </head>
           <body>
-            <div class="cancelled">❌ Payment Cancelled</div>
-            <p>Your payment was not completed.</p>
-            <p>Return to WhatsApp to try again or select Cash on Delivery.</p>
-            <p>You can close this window now.</p>
+            <div class="container">
+              <div class="logo">
+                <img src="https://ipossoft.com/wp-content/uploads/2024/11/ipos-soft-logo.png" alt="iPOS">
+              </div>
+              <div class="cancel-icon">
+                <svg viewBox="0 0 52 52">
+                  <line x1="16" y1="16" x2="36" y2="36"/>
+                  <line x1="36" y1="16" x2="16" y2="36"/>
+                </svg>
+              </div>
+              <h1>Payment Cancelled</h1>
+              <p class="message">Your payment was not completed and no charges were made.</p>
+              <div class="options-box">
+                <p><strong>What's next?</strong></p>
+                <p>📱 Return to <strong>WhatsApp</strong> to:</p>
+                <p>• Try payment again</p>
+                <p>• Select <strong>Cash on Delivery</strong> option</p>
+              </div>
+              <p class="message">You can safely close this window now.</p>
+              <p class="footer">Powered by iPOS</p>
+            </div>
           </body>
         </html>
       `
