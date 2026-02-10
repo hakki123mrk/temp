@@ -334,6 +334,7 @@ async function updatePendingOrder(orderRef, timestamp, updates) {
 // ===== SQS OPERATIONS =====
 async function sendToOrderQueue(orderData) {
   try {
+    console.log(`Sending order to queue:`, JSON.stringify(orderData, null, 2));
     await sqsClient.send(new SendMessageCommand({
       QueueUrl: ORDER_QUEUE_URL,
       MessageBody: JSON.stringify(orderData)
