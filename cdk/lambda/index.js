@@ -349,7 +349,7 @@ async function sendToOrderQueue(orderData) {
 
 // Forward order to middleware API
 async function forwardOrderToMiddleware(orderData) {
-  const middlewareUrl = 'https://mvwxud7juf.execute-api.me-central-1.amazonaws.com/dev/webhooks/pd30wdfa5g/whatsapp';
+  const middlewareUrl = 'https://api.ipossoft.com/createorder/webhooks/pd30wdfa5g/whatsapp';
   
   const payload = JSON.stringify(orderData);
   
