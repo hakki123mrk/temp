@@ -198,10 +198,10 @@ async function saveOutboundMessage(waId, profileName, messageText) {
 
 // Process order from queue
 async function processOrder(orderMessage) {
-  const { orderRef, waId, profileName, orderData, addressData, addressMethod, orderType, timestamp } = orderMessage;
+  const { orderRef, waId, profileName, orderData, addressData, addressMethod, orderType, timestamp, isPrepaid, paymentMethod, paymentStatus } = orderMessage;
   
   console.log(`Processing order ${orderRef} for ${profileName} (${waId})`);
-  console.log(`Order type: ${orderType}, Address method: ${addressMethod}`);
+  console.log(`Order type: ${orderType}, Address method: ${addressMethod}, isPrepaid: ${isPrepaid}`);
   
   const items = orderData?.product_items || [];
   
@@ -234,6 +234,7 @@ async function processOrder(orderMessage) {
       orderType: orderType || 'delivery',
       tableNo: null,
       totalAmount: totalAmount,
+      isPrepaid: isPrepaid || false,
       items: items.map(item => ({
         itemCode: item.product_retailer_id,
         itemName: getProductName(item.product_retailer_id),
